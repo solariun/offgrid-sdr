@@ -17,7 +17,7 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
  NESDR SMArt v5 (R820T)  2.048 MS/s  DSP 5%  audio CoreAudio 80 ms        F1 help  q quit
 ```
 
-## What it does (phase 1)
+## What it does (phases 1 and 2)
 
 | | |
 |---|---|
@@ -25,12 +25,39 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
 | **Modes** | WFM with stereo and **RDS** (station name, programme type, radio text, clock), NFM, AM, SAM (synchronous AM), USB, LSB, CW |
 | **Display** | big frequency, mode buttons, status lights (stereo, RDS, squelch, overload, recording, mute), S-meter with peak hold and level history, spectrum (braille plot with the passband shaded), waterfall (half blocks, 9 colormaps), band list, controls, RDS line, status line |
 | **Controls** | tuning by step / typed frequency / mouse click, step sizes 1 Hz to 1 MHz, 41 bands, volume, mute, squelch, RF gain or auto, filter width, zoom x1-x32, waterfall floor and range (auto floor), stereo/mono, bias-tee, direct sampling, ppm correction |
+| **Decoders** | CW (speed learned), RTTY (shift, speed and polarity found), PSK31/63/125 (speed picked, AFC), NAVTEX (whole messages), DSC (ships' calls), Hellschreiber (picture); in a panel under the waterfall, or printed with `--headless` |
+| **Memories, labels, log** | named memories (frequency, mode, filter); your own labels drawn on the spectrum; a logbook (`logbook.csv`: UTC time, frequency, mode, level, SNR, station, notes) |
+| **Scan** | the current band in its channel steps, or the memories; stops on a signal, goes on 2 s after it ends |
+| **Calibration** | K on a station of known frequency (FM broadcast, a time signal): the stick's error in ppm is measured and corrected |
+| **Settings** | kept between runs in `~/.config/offgrid/settings.ini` (`--fresh` ignores them) |
 | **Recording** | the sound to a 16-bit stereo WAV (R key or `--wav`) |
 | **Themes** | amber (the browser version's default), orange, lime, green, cyan, vfd, blue, violet, rose, mono, light |
 
-Not yet ported (next phases): the decoders (CW, RTTY, PSK, NAVTEX, DSC, weather fax,
-SSTV, ACARS, APRS, AIS, FT8/FT4/WSPR, time signals), DAB/DAB+ and DRM, AUTO mode,
-the waterfall replay, the Signal Monitor, memories and the logbook, SDRconnect.
+Not yet ported (next phases): weather fax, SSTV and time signals (phase 3); ACARS,
+VDL2, APRS, AIS, FT8/FT4/WSPR (phase 4); DAB/DAB+, DRM, AUTO mode, the waterfall
+replay, the Signal Monitor and SDRconnect (phase 5).
+
+### Decoders
+
+Press **d** and pick one (or `--decoder NAME`). As in the browser version, the dial
+then shows the **signal's own frequency**: type the listed frequency (14.071 for
+PSK31, 518k for NAVTEX, 8414.5k for DSC) and the receiver sits below it in USB so the
+tones land where the decoder listens (1.5 kHz for RTTY/NAVTEX/DSC, 1 kHz for PSK and
+Hell; CW uses the CW mode). A green marker on the spectrum shows where the decoder
+expects the signal. **D** switches the decoder off.
+
+Try them with no hardware: `bin/offgrid --demo -f 7.355M --decoder rtty` (also
+7.312M RTTY, 7.275M CW, 14.071M PSK31, 7.0425M PSK63, 518k NAVTEX, 8414.5k DSC,
+14.0635M Hell).
+
+### Files
+
+| File | Contents |
+|---|---|
+| `~/.config/offgrid/settings.ini` | the last frequency, mode, volume, theme, ppm …, the memories, the labels, each band's last frequency (plain text; written on exit) |
+| `~/.config/offgrid/logbook.csv` | the log, one line per entry, for any spreadsheet |
+
+`$XDG_CONFIG_HOME` moves them, and `OFFGRID_CONFIG=dir` overrides the directory.
 
 ## Build
 
@@ -55,7 +82,7 @@ Only a C++11 compiler and `make` are needed: no libraries.
   `make check-static` shows the list.
 
 `make tools` builds `bin/rtl-probe` (finds a stick, streams 2 s, reports the
-rate); `make test` runs the DSP tests.
+rate); `make test` runs every test (DSP and decoders).
 
 ### Linux: give your user the stick
 
@@ -93,7 +120,7 @@ bin/offgrid --headless 10 -f 94.0    # no interface: one status line per second
 | PgUp / PgDn | ±1 MHz |
 | Enter or f | type a frequency (`94.0`, `7074k`, `145.8M`, `1090 MHz`) |
 | 1 … 7, m | WFM, NFM, AM, SAM, USB, LSB, CW; next mode |
-| b | the band list (↑ ↓ Enter) |
+| b | the side list: Bands, Memories, Log tabs (← → change tab, ↑ ↓ Enter) |
 | Tab / Esc | move through the side controls / give the keys back to tuning |
 | + / -, space | volume, mute |
 | g / G, a | RF gain down / up, automatic gain |
@@ -103,6 +130,12 @@ bin/offgrid --headless 10 -f 94.0    # no interface: one status line per second
 | [ ] { } | waterfall floor, waterfall range |
 | t, c | next theme, next waterfall colors |
 | R | record the sound to `offgrid-DATE-TIME.wav` |
+| d / D | decoder menu / decoder off |
+| M, Del | save a memory here (named after the RDS station when there is one) / delete the selected memory |
+| l | label this frequency on the spectrum (empty text removes it) |
+| L | log what you hear (with your notes) |
+| n / N | scan this band / the memories (Esc or any tuning key stops) |
+| K | calibrate on a station of known frequency |
 | F1, h, ? | help |
 | q | quit |
 
@@ -116,16 +149,37 @@ Everything is text, so it works over SSH. With a slow link use `--256` (shorter
 color codes) and a smaller terminal window; the waterfall scrolls at 15 rows a
 second and only changed cells are sent (about 0.5 MB/s at 160x46 in truecolor).
 
+## Reusable libraries
+
+The program is four static libraries plus its interface; each library works on its
+own (no dependency on the program, the terminal or each other, except that the
+decoders use the DSP library's FFT). `make libs` builds them, `make install
+PREFIX=…` installs them with their headers, and each directory has a README:
+
+| Library | What it is |
+|---|---|
+| [`liboffgrid-rtlsdr`](src/rtlsdr/README.md) | the RTL-SDR driver (no libusb) |
+| [`liboffgrid-dsp`](src/dsp/README.md) | demodulators, RDS, spectrum, demo band |
+| [`liboffgrid-decoders`](src/decoders/README.md) | CW, RTTY, PSK, NAVTEX, DSC, Hell, and their signal generators |
+| [`liboffgrid-audio`](src/audio/README.md) | sound output (no sound libraries) |
+
+`make examples` builds two small programs that use them: `example-fm-radio` (an FM
+radio with RDS in ~100 lines: driver + DSP + audio) and `example-decode` (decode a
+WAV file with any decoder).
+
 ## Layout of the code
 
 ```
 src/usb/      USB without libusb: UsbLinux.cpp (usbfs ioctls), UsbMac.cpp (IOKit)
 src/rtlsdr/   the RTL-SDR driver: Rtl2832u (demodulator chip), R82xx (tuners), RtlSdr (public class)
 src/dsp/      signal processing: FFT, filters, demodulators, RDS, spectrum, demo band
+src/decoders/ text and picture decoders: Cw, Rtty, Psk, Navtex (+DSC), Hell; encoders for tests and the demo
 src/audio/    sound out: AudioMac.cpp (AudioQueue), AudioLinux.cpp (ALSA ioctls / pipe)
-src/app/      the program: Source (stick, rtl_tcp, file, demo), Radio (engine), Ui, Bands, Options, main
+src/app/      the program: Source (stick, rtl_tcp, file, demo), Radio (engine), Ui, Store (settings, memories,
+              labels, log), Bands, Options, main
 tools/        rtl-probe
-tests/        test_dsp.cpp
+examples/     fm-radio.cpp, decode.cpp (the libraries on their own)
+tests/        test_dsp.cpp, test_decoders_fsk.cpp, test_decoders_psk.cpp
 external/Graphicx   the terminal graphics and widget library (git submodule)
 spec.md       the specification: requirements, design, decisions, evidence, open problems
 ```

@@ -86,6 +86,18 @@ public:
     // (L, R, L, R ... in -1..1) at audioRate to `audio`.
     void process(const Complex* iq, std::size_t n, std::vector<float>& audio);
 
+    // The demodulated sound of the last process() call as mono at audioRate,
+    // before squelch and volume (with the AGC): what text decoders listen to.
+    const std::vector<float>& decoderAudio() const;
+
+    // Where the received carrier really is, in Hz from the tuned frequency
+    // (WFM/NFM: the mean FM discriminator output since the tune, after
+    // 0.5 s of settling, so it gets more precise the longer it listens; SAM: the
+    // carrier PLL).  NaN in other modes or before any signal.  Used for
+    // frequency calibration: on a station whose frequency is known exactly,
+    // the offset is the stick's error.
+    double carrierOffsetHz() const;
+
     // Measurements (updated by process()).
     double channelDbfs() const;    // power in the channel filter, dBFS
     double noiseDbfs() const;      // estimate of the noise floor near it
@@ -146,6 +158,13 @@ public:
 
     void setCenter(double centerHz);
     const std::vector<DemoStation>& stations() const;
+
+    // Adds a station that sends `audio` (mono, at audioRate, looped) as an
+    // upper-sideband signal whose suppressed carrier is at `hz`: a USB
+    // receiver tuned to `hz` hears the audio.  Used for decoder signals
+    // (RTTY, PSK, NAVTEX ...) made by the program.  levelDb: peak level, dBFS.
+    void addAudioStation(double hz, const std::vector<float>& audio, double audioRate, double levelDb, Mode mode,
+                         const std::string& name);
 
     // Next `n` samples (with noise), as unsigned 8-bit IQ like a stick, so
     // the whole chain is exercised.

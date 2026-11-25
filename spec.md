@@ -1,4 +1,4 @@
-# OFFgrid-SDR TUI — Specification (SDD), v0.1.0
+# OFFgrid-SDR TUI — Specification (SDD), v0.2.0
 
 **What it is.** `offgrid` is a C++11 port of OFFgrid-SDR, the single-file browser receiver by diddy-boy, to a
 **text terminal on Linux and macOS**. It drives an RTL-SDR stick through **its own driver** (no librtlsdr, no
@@ -8,7 +8,9 @@ mode buttons, lights, S-meter, spectrum, waterfall, band list, controls, RDS, st
 painter and a widget toolkit (§9). It builds into **one binary with no third-party libraries**: fully static on
 Linux, OS libraries only on macOS (§0.2 D6).
 
-**Status (2026-11-25): phase 1 of 5 built, measured (DSP self-test 82/82) and committed.** Built: the USB layer (Linux
+**Status (2026-11-25): phase 1 committed (`46da55f`); phase 2 built, measured and committed.** Phase 2 adds
+six decoders (CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber), memories, frequency labels, a logbook, a settings
+file, scanning and frequency calibration, and splits the code into four reusable static libraries (D11). Built: the USB layer (Linux
 usbfs, macOS IOKit), the RTL-SDR driver (RTL2832U + R820T/R820T2/R828D, Blog V4 inputs), the DSP chain (WFM stereo
 + RDS, NFM, AM, SAM, USB, LSB, CW; spectrum; demo band), sound out (macOS AudioQueue, Linux ALSA ioctls or a
 pipe), the sources (stick, rtl_tcp, IQ file, demo), the engine, the terminal interface, WAV recording and the
@@ -29,6 +31,8 @@ file and the code disagree, the disagreement is a defect to be resolved here fir
 |---|---|
 | 2026-11-25 | **Phase 1 written**: `src/usb`, `src/rtlsdr`, `src/dsp`, `src/audio`, `src/app`, `tools/rtl-probe.cpp`, `tests/test_dsp.cpp`, `Makefile`, `TUI.md`, this file; Graphicx added as the submodule `external/Graphicx`; README.MD points to TUI.md. |
 | 2026-11-25 | **Graphicx extended** (Graphicx `c06f4d5`, the submodule's commit): `color.h` (colormaps, themes), `canvas.h` (pixel drawing, two fonts), `ui.h` (Surface, Painter, DotCanvas, Display, layout), `widgets.h` (App and ~25 widgets), events and mouse in `terminal.h`; `tests/test_ui.cpp` (124 checks), `examples/canvas.cpp`, `examples/dashboard.cpp`. The existing picture API is unchanged (its 62 checks still pass). |
+| 2026-11-25 | **Phase 2**: `src/decoders` (liboffgrid-decoders: `Decoder.h` interface + factory, `Cw`, `Rtty`, `Psk`, `Navtex` (+DSC), `Hell`, `Codes`, `FskEncoders`, `PskEncoders`), `tests/test_decoders_fsk.cpp`, `tests/test_decoders_psk.cpp`; `src/app/Store.*`; `examples/fm-radio.cpp`, `examples/decode.cpp`; a README per library; Receiver gains `decoderAudio()` and `carrierOffsetHz()`; DemoSource gains `addAudioStation()` and the demo band carries decoder stations; Radio gains the decoder and the decoder shift (D12); Ui gains the decoder panel, list tabs, prompts, scan, calibration, labels; Makefile builds the libraries. |
+| 2026-11-25 | Defects found in phase 2 and fixed the same day: the demo's Hilbert transformer gave LSB (sign) and then no sideband at all (wrong taps visited) — now USB 37 dB over LSB (E19); the carrier offset wandered ±100 Hz with a 1 s average, then started from a transient with an 8 s one — now a cumulative mean after 0.5 s of settling (E21); Hell's signal flag never rose on a real signal (E20); RTTY re-locked at 75 Bd after noise gaps (P13); `Label` name clash in Ui; tab keys tuned instead of switching tabs. |
 | 2026-11-25 | Defects found while measuring and fixed the same day: the IQ byte count passed as a sample count (half rate, §10 E5); sound "gaps" counted before the first audio arrived (E7); PI printed through a `double` format (E9); overlapping S-meter labels, list scroll bar over text, clipped clock (E10); 8.4 MB/5.6 s of terminal output cut to 2.9 MB (E11). |
 
 ### How to read this document
@@ -71,6 +75,9 @@ problems (**P**), §12 the plan for the next phases, §13 the glossary. "As buil
 | D7 | **The interface is Graphicx.** Everything drawn goes through Graphicx widgets; missing general features were added to Graphicx itself (§9), not to this program. | Gustavo: "extend graphicx to have all the graphics element for design … complete and powerful for all needs". |
 | D8 | **Linux sound falls back to a pipe.** If the ALSA device can't be opened (a sound server owns it), raw S16 is piped to `pw-cat`, `pacat` or `aplay`. | Opening `/dev/snd` directly fails on most desktops (PipeWire/PulseAudio); a child process keeps the binary static. |
 | D9 | **The RTL-SDR driver ports webrtlsdr**, the driver the browser version uses (Apache-2.0, which follows librtlsdr), not librtlsdr itself. | Same behaviour as the browser version, including its Blog V4 handling and gain model. |
+| D11 | **Reusable libraries.** `liboffgrid-rtlsdr` (usb + rtlsdr), `liboffgrid-dsp`, `liboffgrid-decoders`, `liboffgrid-audio`, each with public headers, a README and no dependency on the program; the decoders depend only on the standard library and the DSP library's FFT; every decoder also has its own header. | Gustavo (2026-11-25): "make every decoder and appliable a lib so it can be reused in the future". |
+| D12 | **In decoder modes the dial shows the signal's frequency**; the receiver is tuned below it by the decoder's audio centre (RTTY/NAVTEX/DSC 1500 Hz, PSK/HELL 1000 Hz; CW none). | As the browser version (`modeShift`), so listed frequencies are typed as they are. |
+| D13 | **Settings in `$XDG_CONFIG_HOME/offgrid/settings.ini` (else `~/.config/offgrid`), the log in `logbook.csv` there**; plain text, saved on exit by a write-then-rename. The command line overrides saved settings; `--fresh` ignores them. | Human-readable, editable, no library. |
 | D10 | **No Linux cross-compiler was installed** (`brew install zig` declined by Gustavo, 2026-11-25). | Linux code is syntax-checked against stub headers only until a Linux build is run (P1). |
 
 ### 0.3 Development standards: the definition of done
@@ -101,8 +108,14 @@ Layer, What this file does, How it fits in, Contributing). Commits carry no co-a
 | `src/app/Radio.*` | the engine: DSP thread, tuning, snapshot, WAV recording |
 | `src/app/Ui.*` | the terminal interface |
 | `src/app/Bands.*`, `Options.*`, `main.cpp` | band plan and frequency text, command line, entry point, headless mode |
+| `src/decoders/Decoder.h/.cpp` | the decoder interface, `Kind`, `Status`, `makeDecoder` |
+| `src/decoders/Cw.*`, `Rtty.*`, `Psk.*`, `Navtex.*`, `Hell.*`, `Codes.*` | the decoders and their tables (§6b) |
+| `src/decoders/FskEncoders.*`, `PskEncoders.*` | signal generators for tests and the demo band |
+| `src/app/Store.*` | settings file, memories, labels, logbook |
+| `src/*/README.md` | one per library |
+| `examples/fm-radio.cpp`, `examples/decode.cpp` | the libraries used on their own |
 | `tools/rtl-probe.cpp` | driver smoke test |
-| `tests/test_dsp.cpp` | DSP self-test (PASS/FAIL lines, exit code) |
+| `tests/test_dsp.cpp`, `tests/test_decoders_fsk.cpp`, `tests/test_decoders_psk.cpp` | self-tests (PASS/FAIL lines, exit code) |
 | `external/Graphicx` | git submodule, MIT |
 | `Makefile`, `TUI.md`, `spec.md`, `.gitignore` | build, user guide, this file |
 
@@ -110,9 +123,12 @@ Layer, What this file does, How it fits in, Contributing). Commits carry no co-a
 
 | Target | Result |
 |---|---|
-| `make` | `bin/offgrid`. Linux: `-static -pthread` (R1.1); macOS: `-framework IOKit -framework CoreFoundation -framework AudioToolbox`. Stops with a message when `$(GRAPHICX)/include/graphicx/widgets.h` is missing. |
+| `make libs` | `build/lib/liboffgrid-{rtlsdr,dsp,decoders,audio}.a` |
+| `make examples` | `bin/example-fm-radio`, `bin/example-decode` |
+| `make install` | the four libraries into `$(PREFIX)/lib`, headers into `$(PREFIX)/include/offgrid/{usb,rtlsdr,dsp,decoders,audio}` |
+| `make` | `bin/offgrid` (links the four libraries and Graphicx). Linux: `-static -pthread` (R1.1); macOS: `-framework IOKit -framework CoreFoundation -framework AudioToolbox`. Stops with a message when `$(GRAPHICX)/include/graphicx/widgets.h` is missing. |
 | `make tools` | `bin/rtl-probe` |
-| `make test` | builds and runs `bin/test-dsp` |
+| `make test` | builds and runs every `tests/test_*.cpp` (`bin/test_dsp`, `bin/test_decoders_fsk`, `bin/test_decoders_psk`) |
 | `make check-static` | macOS: `otool -L bin/offgrid`; Linux: `file` and `ldd` |
 | `make clean` | removes `build/` and `bin/` |
 | Variables | `GRAPHICX=path` (default `external/Graphicx`), `STATIC=0` (Linux dynamic), `CXX` |
@@ -147,6 +163,19 @@ R6.3 Delay bounded to ≤ 250 ms (clock drift). R6.4 WAV recording, 16-bit stere
 **R7 Interface.** R7.1 Everything usable by keyboard *and* mouse. R7.2 Works from 90 columns (no side panel
 below 90, a 28-column panel from 90, 34 from 110). R7.3 Truecolor default, `--256` option. R7.4 Only changed
 cells are sent; waterfall at 15 rows/s. R7.5 Every theme from Graphicx. R7.6 The keys of TUI.md.
+
+**R9 Decoders.** R9.1 One interface (`process` mono audio at any rate ≥ 8 kHz, `takeText`, `status`, `reset`,
+`audioCenterHz`; pictures through `takeColumns`). R9.2 CW (speed learned), RTTY (shift 170/200/425/450/850, 45.45/50/75
+Bd, polarity found), PSK31/63/125 (speed picked, AFC ±50 Hz), NAVTEX (messages with station/subject/number), DSC
+(format, category, nature, MMSIs), Feld Hell (columns). R9.3 No text from noise alone. R9.4 Decoders hear the sound
+before squelch and volume. R9.5 Each decoder usable alone (D11).
+
+**R10 Keeping things.** Memories (name, frequency, mode, filter), labels (shown on the spectrum), the log (CSV, UTC),
+the settings and each band's last frequency (D13).
+
+**R11 Scan and calibration.** Band scan in the band's step, memory scan; 0.2 s per channel; stop on squelch (or 12
+dB over the noise when the squelch is off), resume 2 s after. Calibration from the carrier of a known station:
+error = −offset / frequency, added to the ppm correction after confirmation.
 
 **R8 Headless.** `--headless N`: one status line per second for N seconds (level, noise, measured rate, DSP load,
 sound queue and gaps, drops, stereo, overload, RDS, strongest spectrum peaks).
@@ -251,7 +280,39 @@ span/zoom, centred on the dial in quarter-window jumps; the DC bin is replaced b
 waterfall rows = peak of two frames (15/s); the waterfall floor follows the 20th percentile − 3 dB until the
 user moves it. With no widget focused, keys tune (App with `autoFocus = false`, `clearFocus()` on Esc).
 
-**Headless** (`main.cpp`): R8; peaks = local maxima 15 dB over the median, DC excluded, top 5.
+**Headless** (`main.cpp`): R8; peaks = local maxima 15 dB over the median, DC excluded, top 5; the carrier offset
+and its ppm; with `--decoder`, the decoder's status and each new piece of text (`decoded: …`).
+
+**Phase 2 in the interface (as built).** The side list has three tabs (Bands, Memories, Log; ←/→ switch them while
+the list is focused). A decoder (menu on `d`, or `--decoder`) sets the mode (CW for CW, else USB with a 3 kHz
+filter and the decoder shift, D12), opens a panel under the waterfall (a third of the main area: wrapped text,
+newest at the bottom; Hell: the columns as a half-block picture) titled with the decoder's mode and status, and
+adds a green spectrum marker where the decoder expects the tone. The decoder is reset on every retune. Memories
+(`M`) are named after the RDS station when there is one; `Del` deletes the selected one. Labels (`l`) within 500 Hz
+replace each other; empty text removes. The log (`L`) records UTC time, dial, mode (or the decoder), level, SNR,
+RDS station and notes. Scan state: SCAN light amber while moving, green while held on a signal. Calibration (`K`)
+needs WFM, NFM or SAM and a signal ≥ 10 dB over the noise, and shows the measured offset, the error and the new
+correction before applying it; the ppm is saved.
+
+**Persistence** (`Store.cpp`, D13): `[settings]` key=value; `[bands]` name=Hz; `[memories]` name|Hz|mode|filter;
+`[labels]` Hz|text (sorted). Text fields lose `| , " tab CR LF`. Saved on exit: frequency, mode, filter, volume,
+squelch, gain, ppm, stereo, de-emphasis, theme, colormap, step, zoom, waterfall range, decoder.
+
+## 6b. Decoders (as built)
+
+Common: every decoder implements `dec::Decoder` (D11, R9). Audio centres and dial offsets: RTTY/NAVTEX/DSC 1500 Hz
+(tones e.g. 1415/1585 Hz; NAVTEX mark = higher tone, DSC a 1 bit = lower tone), PSK/HELL 1000 Hz, CW the tone
+anywhere 300–1200 Hz. Ported from OFFgrid-SDR's JavaScript with these documented changes ("Addition to the JS" in the
+code): **PSK** ignores a lone 0 before the first character (the JS lost the first character about half the time),
+closes its squelch after 2 weak bit centres (the JS printed a stray character after each over), opens only on a
+strong idle with a small AFC error, pulls in faster while shut; NaN recovery on every running value. **Hell** has a
+tone-over-neighbours detector (tone at 1000 Hz against 500 and 1500 Hz, ≥ 6 dB, 1 s hold) for its signal flag.
+**NAVTEX/DSC** find the 170 Hz pair by band energy, keep reading bits once the pair is known, break sync ties by
+the phasing symbols, learn DX/RX parity from the phasing, so a single transmission decodes (the JS relied on its
+looping demo); `navtexAudio` sends 144 phasing slots (≈10 s, as real stations). **CW** filters ±125 Hz around the
+tone it finds by FFT before measuring the level (the JS relied on the receiver's narrow filter). **RTTY** runs a
+twin decoder of the opposite polarity and switches when the twin reads better text; text already handed out is
+not taken back. The first characters after a pause are lost while the speed is learned (CW, RTTY), as in the JS.
 
 ## 9. Graphicx contract (as built)
 
@@ -283,6 +344,14 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | E11 | Terminal output, 5.6 s demo at 160x46 | 8.4 MB before; 2.9 MB truecolor / 2.6 MB with `--256` after (changed-colors-only SGR, waterfall 15 rows/s) |
 | E12 | WAV of 6 s from VERONICA | 289,537 frames at 48 kHz (6.03 s), RMS L 0.103 R 0.103, L−R 0.074 (real stereo) |
 | E13 | DSP self-test (`make test`, 82 checks, ~5 s) | **all pass** (also clean under ASan+UBSan): FFT tone at −0.00 dBFS, leakage < −147 dB; resampler 480,000–480,001 frames in 10 s at 2.048 and 2.4 MS/s; blocks of 0–13 samples equal one big block; FM demo: levels within 0.1 dB, pilot on the stereo stations only, RDS PS in 0.45–0.70 s, tones 1000.0/1500.0 Hz, stereo separation ~25.7 dB, PI/RT/PTY/clock exact; HF demo: AM/SAM/NFM tones 1000.0 Hz, CW 700.0 Hz, ≥ 99.7 % of SSB energy in 100–3000 Hz, opposite sideband rejected by 79.7 dB, squelched empty channel silent. Cost at 2.4 MS/s (Apple M2, `-O2`): WFM stereo+RDS 5.3 % of a core, NFM 2.2 %, AM 2.2 %, SAM 2.4 %, USB/LSB 2.0 %, CW 2.1 %; demo generator 5.0 % |
+| E15 | Decoder self-tests | `test_decoders_fsk` 62/62 (overs separated by loud noise gaps decode one by one at 45.45/170 and 50/450, speed kept; CW 20/35 WPM within 2 %, tone ±0.4 Hz; RTTY 45.45/170 and 50/450 normal and reversed; NAVTEX exact with header; DSC 4/4 calls; reset; 20 s of noise gives no text; 48 and 12 kHz at 15 dB SNR in 3 kHz). `test_decoders_psk` 62/62 (PSK31/63/125 exact at 10 dB SNR on tone and 30 Hz off, ±50 Hz AFC, speed picked, mid-over start, speed change, NaN/Inf, 60 s of noise gives no text; Hell 59/59 letters, signal flag up in every over and never on noise) |
+| E16 | Decoder CPU (Apple, 48 kHz audio) | CW ~1530×, RTTY ~800×, NAVTEX ~1670×, DSC ~1660×, PSK (3 speeds) ~768×, Hell ~667× real time |
+| E17 | Demo band through the whole radio (IQ → receiver → decoder), headless 25–40 s | RTTY 50/450 at 7.355 MHz ✓; PSK31 14.071 MHz and PSK63 7.0425 MHz exact; NAVTEX 518 kHz the whole message with header; DSC 8414.5 kHz both calls (safety, distress "sinking", MMSIs); CW 7.275 MHz 20 WPM ("RQ CQ DE OFFGRID OFFGRID K": the first letter after each pause is lost, as in the JS); Hell the picture readable; RTTY 45.45/170 at 7.312 MHz: every over after the first exact ("UUQ DE …" on the first while the speed is learned, P14) after the P13 fix |
+| E18 | Interface (pty capture, temporary config dir) | PSK decoder panel shows the text; `M` wrote `PSK31 demo\|14071000\|USB\|3000`, `l` wrote the label, `L` appended `…,14071000,PSK,-46.5,23.2,,nice signal`; PSK light on |
+| E19 | Demo audio stations: a 1 kHz tone at 10.5 MHz received in USB and LSB | USB −32.0 dBFS, audio RMS 0.357; LSB −69.2 dBFS, RMS 0.0045 (37 dB) |
+| E20 | Hell signal flag on the demo station through the radio | was "searching" (contrast 44 % < 0.45); now up 78 of 80 quarter-seconds (down only in the gaps' tails) |
+| E21 | Calibration on the stick, 24 s per station | GLOW FM 94.0 MHz: +43.8 Hz → −0.47 ppm (steady from 4 s: −0.45…−0.49); VERONICA 99.4 MHz: +31.8 Hz → −0.32 ppm; agreement 0.15 ppm (station tolerance, multipath); the NESDR SMArt v5 has a 0.5 ppm TCXO |
+| E22 | `example-fm-radio` (driver + DSP + audio libraries only) on the stick | GLOW FM in stereo with RDS text, through the speakers |
 | E14 | Graphicx `make test` | 62 picture checks + 124 interface checks, 0 failures; `example-dashboard` driven in a pty (keys, mouse, theme change, menu, quit) |
 
 ## 11. Open problems
@@ -300,13 +369,16 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | P12 | No GCC build yet of the DSP (clang only). | Part of P1. |
 | P8 | The terminal sends ~0.5 MB/s at 160x46 truecolor. | Fine locally and on a LAN; for slow links `--256`, a smaller window; a "low bandwidth" mode (slower waterfall, 15 fps) is a candidate. |
 | P9 | `Plot` y labels are a fixed 7 columns; the waterfall leaves that gutter empty. | Cosmetic. |
-| P10 | No settings file: theme, band memories and gains are not kept between runs. | Phase 2 (memories). |
+| P10 | ~~No settings file~~ | Fixed in phase 2 (D13). |
+| P13 | ~~RTTY re-locked at 75 Bd after a gap of AGC-amplified noise~~ (the JS kept measuring pulse lengths on noise). Fixed: the pair counts only while the two tone filters hold ≥ 25 % of the power; history cleared when it goes; speed changes need two agreeing measurements; characters read from the start of an over on the known tones; start bits need 0.8 bit of mark before; tone moves smoothed. | Fixed 2026-11-25 (E15, E17). |
+| P14 | CW and RTTY lose the first characters after a pause (speed learning), as the JS does. | By design for now; a look-back re-decode is possible. |
+| P15 | Calibration needs ≥ 10 dB SNR and several seconds; FM stations can be a few tens of Hz off (0.3 ppm at 100 MHz). | Average two stations; a time signal (WWV 10 MHz) needs HF. |
 
 ## 12. Plan: the next phases
 
 | Phase | Content |
 |---|---|
-| 2 | Text decoders on the audio: CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber; memories, logbook, labels, settings file; scan; frequency calibration |
+| 2 | **Built (2026-11-25):** text decoders on the audio: CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber; memories, logbook, labels, settings file; scan; frequency calibration; the code split into reusable libraries |
 | 3 | Pictures: weather fax, SSTV (shown with Graphicx `ImageView` / braille); time signals (CHU, WWV, RWM) and the clock |
 | 4 | Data: ACARS, VDL2, APRS, AIS, FT8/FT4/WSPR (with the "Heard" list and band survey) |
 | 5 | Digital broadcast: DAB/DAB+ and DRM (AAC/xHE-AAC in C++11), AUTO mode, Signal Monitor, waterfall replay, SDRconnect |

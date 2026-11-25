@@ -15,6 +15,7 @@
 // ============================================================================
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <string>
@@ -26,6 +27,7 @@
 #include "Bands.h"
 #include "Options.h"
 #include "Radio.h"
+#include "Store.h"
 #include "Ui.h"
 
 namespace {
@@ -67,6 +69,11 @@ int headless(app::Radio& radio, const app::Options& o) {
                         second, snap.channelDbfs, snap.noiseDbfs, snap.sampleRateMeasured / 1e6, snap.dspLoad * 100,
                         snap.audioQueued * 1000, snap.audioUnderruns, snap.samplesDropped, snap.stereoPilot ? "  STEREO" : "",
                         snap.overload ? "  OVERLOAD" : "");
+            if (!std::isnan(snap.carrierHz))
+                std::printf("  carrier %+.1f Hz (%+.2f ppm)", snap.carrierHz, -snap.carrierHz / radio.settings().frequency * 1e6);
+            if (snap.decoderOn)
+                std::printf("  %s %s%s", snap.decoder.mode.empty() ? dec::kindName(snap.decoderKind) : snap.decoder.mode.c_str(),
+                            snap.decoder.locked ? "locked" : "searching", snap.decoder.info.empty() ? "" : (" " + snap.decoder.info).c_str());
             if (snap.rds.groups > 0)
                 std::printf("  RDS groups %u PI %04X PS \"%s\" PTY %s RT \"%s\"", snap.rds.groups, snap.rds.pi, snap.rds.ps.c_str(),
                             snap.rds.ptyName.c_str(), snap.rds.radioText.c_str());
@@ -92,6 +99,9 @@ int headless(app::Radio& radio, const app::Options& o) {
                 }
             }
             std::printf("\n");
+            std::string text;
+            radio.takeDecoderText(text);
+            if (!text.empty()) std::printf("decoded: %s\n", text.c_str());
             std::fflush(stdout);
         }
         if (elapsed >= o.headlessSeconds) break;
@@ -101,9 +111,34 @@ int headless(app::Radio& radio, const app::Options& o) {
 
 }  // namespace
 
+// Saved settings become the defaults; the command line still wins (it is
+// parsed after).
+void applyStore(const app::Store& st, app::Options& o) {
+    o.radio.frequency = st.getNumber("frequency", o.radio.frequency);
+    dsp::Mode m;
+    if (dsp::parseMode(st.get("mode"), m)) o.radio.mode = m;
+    o.radio.bandwidth = st.getNumber("bandwidth", o.radio.bandwidth);
+    o.radio.volume = st.getNumber("volume", o.radio.volume);
+    o.radio.squelchDb = st.getNumber("squelch", o.radio.squelchDb);
+    o.radio.gainDb = st.getNumber("gain", o.radio.gainDb);
+    o.radio.ppm = st.getNumber("ppm", o.radio.ppm);
+    o.radio.stereo = st.get("stereo", o.radio.stereo ? "1" : "0") == "1";
+    o.radio.deemphasisUs = st.getNumber("deemphasis", o.radio.deemphasisUs);
+    if (!st.get("theme").empty()) o.theme = st.get("theme");
+    o.colormap = st.get("colormap", o.colormap);
+}
+
 int main(int argc, char** argv) {
     app::Options o;
-    std::string error = app::parse(argc, argv, o);
+    app::Store store;
+    std::string error;
+    bool fresh = false;
+    for (int i = 1; i < argc; ++i) fresh = fresh || std::string(argv[i]) == "--fresh";
+    if (!fresh) {
+        store.load(error);
+        applyStore(store, o);
+    }
+    error = app::parse(argc, argv, o);
     if (!error.empty()) {
         std::fprintf(stderr, "offgrid: %s\n", error.c_str());
         return 2;
@@ -134,13 +169,25 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (!o.wav.empty() && !radio.startRecording(o.wav, error)) std::fprintf(stderr, "offgrid: %s\n", error.c_str());
+    dec::Kind kind;
+    if (o.headlessSeconds > 0 && !o.decoder.empty() && dec::parseKind(o.decoder, kind)) {
+        // As in the interface: CW in CW mode, the others in USB with the dial
+        // on the signal's frequency.
+        if (kind == dec::Kind::Cw) radio.setMode(dsp::Mode::CW);
+        else {
+            radio.setMode(dsp::Mode::USB);
+            radio.setBandwidth(3000);
+            radio.setDecoderShift(dec::makeDecoder(kind)->audioCenterHz());
+        }
+        radio.setDecoder(true, kind);
+    }
 
     int code = 0;
     if (o.headlessSeconds > 0) {
         code = headless(radio, o);
     } else {
-        app::Ui ui(radio, o);
-        code = ui.run();
+        app::Ui ui(radio, o, store);
+        code = ui.run();  // saves the settings on the way out
     }
     radio.stop();
     return code;

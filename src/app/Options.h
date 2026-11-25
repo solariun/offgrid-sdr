@@ -44,6 +44,8 @@ struct Options {
     bool help, version;
     double headlessSeconds;  // --headless N: no interface, print status lines
     std::string wav;         // --wav out.wav: record the demodulated sound
+    std::string decoder;     // --decoder cw|rtty|psk|navtex|dsc|hell
+    bool fresh;              // --fresh: ignore the saved settings
 };
 
 // Parses argv into opts.  Returns "" or an error message.

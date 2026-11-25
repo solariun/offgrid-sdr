@@ -60,6 +60,7 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <mutex>
 
 namespace dsp {
@@ -423,6 +424,7 @@ struct Receiver::Impl {
 
     // Designs every filter for the current mode, bandwidth and rates.
     void build() {
+        resetCarrier();
         const double fs = cfg.sampleRate;
         const Mode mode = cfg.mode;
         bw = effectiveBandwidth();
@@ -559,7 +561,38 @@ struct Receiver::Impl {
         prevIm = pi;
     }
 
+    std::vector<float> tap;  // decoder audio of the last process() call
+    // Carrier offset measured by the demodulator (Hz from the tuned
+    // frequency): FM = mean discriminator output, SAM = the PLL frequency.
+    bool carrierValid = false;
+    std::atomic<double> carrierHz{0.0};
+
+    // Mean frequency of the discriminator output (before any DC removal):
+    // the first 0.5 s after a (re)tune is skipped (filters settling), then
+    // the mean of everything since, whose error falls as listening goes on.
+    double carrierSum = 0, carrierCount = 0, carrierSkip = 0;
+    void trackCarrier(const float* fm, std::size_t n, double rate) {
+        if (n == 0 || fmGain == 0) return;
+        if (!carrierValid && carrierCount == 0 && carrierSkip == 0) carrierSkip = 0.5 * rate;
+        if (carrierSkip > 0) {
+            carrierSkip -= static_cast<double>(n);
+            if (carrierSkip > 0) return;
+            carrierSkip = -1;  // done skipping (until the next reset)
+        }
+        double sum = 0;
+        for (std::size_t i = 0; i < n; ++i) sum += fm[i];
+        carrierSum += sum / fmGain * rate / kTwoPi;
+        carrierCount += static_cast<double>(n);
+        carrierHz = carrierSum / carrierCount;
+        carrierValid = true;
+    }
+    void resetCarrier() {
+        carrierValid = false;
+        carrierSum = carrierCount = carrierSkip = 0;
+    }
+
     void process(const Complex* iq, std::size_t n, std::vector<float>& audio) {
+        tap.clear();
         if (!built) build();
         if (n == 0) return;
         const Mode mode = cfg.mode;
@@ -624,6 +657,7 @@ struct Receiver::Impl {
             ensureSize(mpx, nc);
             ensureSize(diff, nc);
             discriminate(dr, di, nc, &mpx[0]);
+            trackCarrier(&mpx[0], nc, rate2);
             rdsDec.process(&mpx[0], nc, rate1);
             pll.process(&mpx[0], &diff[0], nc);
             pilot = pll.locked;
@@ -652,6 +686,7 @@ struct Receiver::Impl {
             switch (mode) {
                 case Mode::NFM:
                     discriminate(dr, di, nc, out);
+                    trackCarrier(out, nc, rate2);
                     for (std::size_t i = 0; i < nc; ++i) out[i] -= nfmDc.step(out[i]);  // remove a frequency offset
                     break;
                 case Mode::AM: {
@@ -671,7 +706,11 @@ struct Receiver::Impl {
                     amCarrier = car;
                     break;
                 }
-                case Mode::SAM: sam.process(dr, di, nc, out, cfg.agc); break;
+                case Mode::SAM:
+                    sam.process(dr, di, nc, out, cfg.agc);
+                    carrierHz = sam.fr * sam.rate / kTwoPi;
+                    carrierValid = true;
+                    break;
                 case Mode::USB:
                 case Mode::LSB:
                     // The channel filter left only one side of 0 Hz: its real
@@ -704,6 +743,14 @@ struct Receiver::Impl {
         ensureSize(o1, mo);
         const std::size_t no = twoCh ? resampler.process(&e0[0], &e1[0], na, &o0[0], &o1[0])
                                      : resampler.process(&e0[0], 0, na, &o0[0], 0);
+
+        // 6b. Decoder tap: mono, before squelch and volume (decoders keep
+        //     working while the sound is muted or squelched).
+        {
+            const std::size_t t0 = tap.size();
+            tap.resize(t0 + no);
+            for (std::size_t i = 0; i < no; ++i) tap[t0 + i] = twoCh ? 0.5f * (o0[i] + o1[i]) : o0[i];
+        }
 
         // 7. Squelch gate (5 ms ramp), volume, clip, interleave.
         const float vol = static_cast<float>(clampd(cfg.volume, 0, 2));
@@ -756,6 +803,7 @@ void Receiver::configure(const ReceiverConfig& c) {
         // that belongs to the old signal starts again.
         s.mixer.setFrequency(-c.offsetHz, c.sampleRate);
         s.sam.reset();
+        s.resetCarrier();
         s.amCarrier = 0;
         s.agc.reset();
         s.chanPow = -1;
@@ -775,6 +823,13 @@ void Receiver::configure(const ReceiverConfig& c) {
 const ReceiverConfig& Receiver::config() const { return impl_->cfg; }
 
 void Receiver::process(const Complex* iq, std::size_t n, std::vector<float>& audio) { impl_->process(iq, n, audio); }
+const std::vector<float>& Receiver::decoderAudio() const { return impl_->tap; }
+double Receiver::carrierOffsetHz() const {
+    if (!impl_->carrierValid) return std::numeric_limits<double>::quiet_NaN();
+    const Mode m = impl_->cfg.mode;
+    if (m != Mode::WFM && m != Mode::NFM && m != Mode::SAM) return std::numeric_limits<double>::quiet_NaN();
+    return impl_->carrierHz;
+}
 
 double Receiver::channelDbfs() const { return impl_->chanDb; }
 double Receiver::noiseDbfs() const { return impl_->noiseDb; }

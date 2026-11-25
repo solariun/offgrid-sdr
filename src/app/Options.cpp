@@ -31,7 +31,8 @@ Options::Options()
       list(false),
       help(false),
       version(false),
-      headlessSeconds(0) {}
+      headlessSeconds(0),
+      fresh(false) {}
 
 const char* versionString() { return "offgrid 0.1.0 (C++11 terminal port of OFFgrid-SDR 2.5)"; }
 
@@ -111,6 +112,13 @@ std::string parse(int argc, char** argv, Options& o) {
         } else if (a == "--headless" && hasValue) {
             o.headlessSeconds = std::atof(v.c_str());
             ++i;
+        } else if (a == "--decoder" && hasValue) {
+            dec::Kind k;
+            if (!dec::parseKind(v, k)) return "--decoder: one of cw, rtty, psk, navtex, dsc, hell";
+            o.decoder = v;
+            ++i;
+        } else if (a == "--fresh") {
+            o.fresh = true;
         } else if (a == "--wav" && hasValue) {
             o.wav = v;
             ++i;
@@ -168,6 +176,9 @@ std::string usage() {
            "Other\n"
            "  --headless SECONDS      no interface: print the signal, RDS and status each second\n"
            "  --wav FILE              record the sound to a WAV file (also R in the interface)\n"
+           "  --decoder NAME          start a decoder: cw, rtty, psk, navtex, dsc, hell (d in the\n"
+           "                          interface); with --headless the text is printed\n"
+           "  --fresh                 ignore the saved settings (~/.config/offgrid/settings.ini)\n"
            "  -V, --version           version\n"
            "  -h, --help              this text\n"
            "\n"
@@ -176,6 +187,7 @@ std::string usage() {
            "  Enter or f type a frequency   1-7 WFM NFM AM SAM USB LSB CW   b bands\n"
            "  +/- volume  space mute  g/G gain (a auto)  s/S squelch  z/Z zoom\n"
            "  [ ] waterfall floor  { } waterfall range  t theme  c colors  R record  q quit\n"
+           "  d decoder  M memory  l label  L log  n/N scan band/memories  K calibrate\n"
            "  Mouse: click the spectrum or waterfall to tune, wheel to step.\n";
 }
 

@@ -35,12 +35,14 @@
 
 #include "Options.h"
 #include "Radio.h"
+#include "Store.h"
 
 namespace app {
 
 class Ui {
 public:
-    Ui(Radio& radio, const Options& options);
+    // store: settings, memories, labels (read at start, updated on exit).
+    Ui(Radio& radio, const Options& options, Store& store);
     ~Ui();
     // Runs until the user quits (q, Ctrl+C).  Returns the exit code.
     int run();

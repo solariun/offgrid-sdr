@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "../audio/AudioOutput.h"
+#include "../decoders/Decoder.h"
 #include "../dsp/Receiver.h"
 #include "Source.h"
 
@@ -53,6 +54,10 @@ struct RadioSettings {
     bool muted;
     int fftSize;
     int directSampling;   // 0 off, 1 I, 2 Q
+    // Decoder modes (as the browser version): `frequency` is the signal's;
+    // the receiver is tuned this much lower so its tones land at the
+    // decoder's audio centre (RTTY/NAVTEX/DSC 1500 Hz, PSK/HELL 1000 Hz).
+    double decoderShift;
 };
 
 // What the user interface shows, copied out of the DSP thread.
@@ -69,6 +74,10 @@ struct Snapshot {
     double dspLoad;               // DSP thread busy fraction (0..1 of one core)
     double sampleRateMeasured;    // samples/s actually arriving
     bool overload;                // IQ samples hitting the rails (lower the gain)
+    double carrierHz;             // measured carrier offset from the dial (NaN = none)
+    bool decoderOn;
+    dec::Kind decoderKind;
+    dec::Status decoder;          // the decoder's status (when on)
 };
 
 class Radio {
@@ -92,6 +101,14 @@ public:
     void setBiasTee(bool on);
     void setMuted(bool on);
     void setFftSize(int n);
+
+    // Text / picture decoder on the demodulated sound (liboffgrid-decoders).
+    void setDecoder(bool on, dec::Kind kind = dec::Kind::Cw);
+    void setDecoderShift(double hz);
+    void resetDecoder();
+    // New decoded text / Hell columns since the last call (UI thread).
+    void takeDecoderText(std::string& out);
+    void takeDecoderColumns(std::vector<std::vector<float> >& out);
 
     // Records the demodulated sound (16-bit stereo WAV at the audio rate).
     bool startRecording(const std::string& path, std::string& error);
@@ -124,6 +141,13 @@ private:
 
     std::atomic<bool> running_;
     std::thread thread_;
+
+    // Decoder: created / replaced on the DSP thread when decoderDirty_.
+    std::unique_ptr<dec::Decoder> decoder_;
+    bool decoderWanted_, decoderDirty_, decoderReset_;
+    dec::Kind decoderKind_;
+    std::string decText_;                          // waiting for the UI
+    std::vector<std::vector<float> > decColumns_;  // waiting for the UI
 
     // WAV recording (guarded by mutex_; written by the DSP thread).
     void writeWav(const std::vector<float>& audio);

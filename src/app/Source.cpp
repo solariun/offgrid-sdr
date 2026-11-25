@@ -38,6 +38,8 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../decoders/FskEncoders.h"
+#include "../decoders/PskEncoders.h"
 #include "../dsp/Receiver.h"
 #include "../rtlsdr/RtlSdr.h"
 
@@ -401,9 +403,52 @@ private:
     FILE* file_;
 };
 
+// The decoder stations of the demo band, where the browser version's demo
+// puts them (signal frequencies; each is sent as USB audio with its tones
+// at the usual audio centre, so the decoder modes find them on the dial).
+void addDecoderStations(dsp::DemoSource& demo) {
+    const double r = 12000;  // audio rate of the generated programmes
+    using namespace dec::enc;
+    // RTTY: weather-style 50 Bd / 450 Hz and amateur 45.45 Bd / 170 Hz.
+    std::vector<float> a = rttyAudio("\nWEATHER BULLETIN OFFGRID MET 1200 UTC WIND SW 4 TO 5 SEA MODERATE VIS GOOD\n", 50, 450, 1500, r);
+    append(a, silence(2, r));
+    demo.addAudioStation(7355000 - 1500, a, r, -38, dsp::Mode::USB, "RTTY 50/450");
+    a = rttyAudio("\nCQ CQ CQ DE OFFGRID OFFGRID PSE K\n", 45.45, 170, 1500, r);
+    append(a, silence(3, r));
+    demo.addAudioStation(7312000 - 1500, a, r, -40, dsp::Mode::USB, "RTTY 45/170");
+    // CW 20 WPM (tone 700 Hz above the carrier).
+    a = cwAudio("CQ CQ DE OFFGRID OFFGRID K", 20, 700, r, 0.5, 0.5, 3.0);
+    demo.addAudioStation(7275000 - 700, a, r, -40, dsp::Mode::CW, "CW 20 WPM");
+    // NAVTEX 518 kHz (real phasing length, so the decoder catches ZCZC).
+    a = navtexAudio("ZCZC SA23\nNITON NAVTEX DEMO\nGALE WARNING SOLE FITZROY SOUTHWEST GALE 8 EXPECTED\nNNNN\n", r, 1500);
+    append(a, silence(5, r));
+    demo.addAudioStation(518000 - 1500, a, r, -36, dsp::Mode::USB, "NAVTEX 518");
+    // DSC 8414.5 kHz: a safety call, then a distress call.
+    std::vector<int> bits = dscBits(dscAllShipsFields(108, "232123456"));
+    for (int i = 0; i < 300; ++i) bits.push_back(i & 1);  // dot pattern between calls
+    std::vector<int> distress = dscBits(dscDistressFields("244567890", 105));
+    bits.insert(bits.end(), distress.begin(), distress.end());
+    a = dscAudio(bits, r, 1500);
+    append(a, silence(6, r));
+    demo.addAudioStation(8414500 - 1500, a, r, -38, dsp::Mode::USB, "DSC 8414.5");
+    // PSK31, PSK63 and Feld Hell (tone at 1000 Hz).
+    a.clear();
+    dec::synthPsk("CQ CQ CQ de OFFGRID OFFGRID pse k\n", 31.25, r, a);
+    append(a, silence(3, r));
+    demo.addAudioStation(14071000 - 1000, a, r, -40, dsp::Mode::USB, "PSK31");
+    a.clear();
+    dec::synthPsk("OFFGRID PSK63 test: the quick brown fox jumps over the lazy dog\n", 62.5, r, a);
+    append(a, silence(3, r));
+    demo.addAudioStation(7042500 - 1000, a, r, -40, dsp::Mode::USB, "PSK63");
+    a.clear();
+    dec::synthHell("OFFGRID HELL 73", r, a);
+    append(a, silence(2, r));
+    demo.addAudioStation(14063500 - 1000, a, r, -38, dsp::Mode::USB, "HELL");
+}
+
 class DemoSourceImpl : public PacedSource {
 public:
-    DemoSourceImpl(double rate, double center) : PacedSource(rate, center), demo_(rate, center) {}
+    DemoSourceImpl(double rate, double center) : PacedSource(rate, center), demo_(rate, center) { addDecoderStations(demo_); }
     ~DemoSourceImpl() { stopThread(); }
     bool start(std::string&) { return startThread(); }
     std::string name() const { return "demo (simulated stations)"; }

@@ -1,73 +1,105 @@
 # OFFgrid-SDR TUI - a terminal software-defined radio receiver in C++11.
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-#   make                 bin/offgrid (static on Linux; system libraries only on macOS)
-#   make tools           bin/rtl-probe (driver smoke test with a stick)
-#   make test            build and run the DSP tests
+# The program is built from four reusable static libraries (each usable on
+# its own; see the README.md in each src/ directory):
+#
+#   build/lib/liboffgrid-rtlsdr.a    src/usb + src/rtlsdr  RTL-SDR driver (no libusb)
+#   build/lib/liboffgrid-dsp.a       src/dsp               demodulators, RDS, spectrum, demo band
+#   build/lib/liboffgrid-decoders.a  src/decoders          CW, RTTY, PSK, NAVTEX, DSC, Hell (+ encoders)
+#   build/lib/liboffgrid-audio.a     src/audio             sound out (AudioQueue / ALSA / pipe)
+#
+#   make                 bin/offgrid (static on Linux; OS libraries only on macOS)
+#   make libs            only the four libraries
+#   make examples        bin/example-* (small programs using one or two libraries)
+#   make tools           bin/rtl-probe
+#   make test            build and run every test
+#   make install         libraries + headers into $(PREFIX) (default /usr/local)
 #   make check-static    show what bin/offgrid links against
 #   make clean
 #
-# Variables:
-#   GRAPHICX=path        the Graphicx library (default: the external/Graphicx submodule)
-#   STATIC=0             Linux: link dynamically (default 1 = fully static)
-#   CXX=...              compiler (g++ / clang++); musl-gcc style wrappers work too
-#
-# No third-party library is needed: USB and sound talk to the kernel (Linux
-# usbfs and ALSA) or to the OS frameworks (macOS IOKit, AudioToolbox).
+# Variables: GRAPHICX=path (default external/Graphicx), STATIC=0 (Linux:
+# dynamic), PREFIX=..., CXX=...
 
 CXX      ?= c++
 GRAPHICX ?= external/Graphicx
 STATIC   ?= 1
+PREFIX   ?= /usr/local
 CXXFLAGS ?= -O2
-CXXFLAGS += -std=c++11 -Wall -Wextra -Wpedantic -MMD -MP -I$(GRAPHICX)/include -pthread
+CXXFLAGS += -std=c++11 -Wall -Wextra -Wpedantic -MMD -MP -Isrc -I$(GRAPHICX)/include -pthread
 
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
-  LDLIBS  += -framework IOKit -framework CoreFoundation -framework AudioToolbox
+  SYSLIBS := -framework IOKit -framework CoreFoundation -framework AudioToolbox
 else
   ifeq ($(STATIC),1)
     LDFLAGS += -static
   endif
-  LDLIBS  += -pthread
+  SYSLIBS := -pthread
 endif
 
 ifeq ($(wildcard $(GRAPHICX)/include/graphicx/widgets.h),)
   $(error Graphicx not found at $(GRAPHICX): run "git submodule update --init" (or set GRAPHICX=path))
 endif
 
-GFX_SRCS := $(addprefix $(GRAPHICX)/src/,graphicx.cpp terminal.cpp color.cpp canvas.cpp ui.cpp widgets.cpp)
-DRV_SRCS := $(wildcard src/usb/*.cpp) $(wildcard src/rtlsdr/*.cpp)
-DSP_SRCS := $(wildcard src/dsp/*.cpp)
-AUD_SRCS := $(wildcard src/audio/*.cpp)
-APP_SRCS := $(wildcard src/app/*.cpp)
-
 obj = $(patsubst %.cpp,build/%.o,$(subst $(GRAPHICX)/,gfx/,$(1)))
-GFX_OBJS := $(call obj,$(GFX_SRCS))
-DRV_OBJS := $(call obj,$(DRV_SRCS))
-DSP_OBJS := $(call obj,$(DSP_SRCS))
-AUD_OBJS := $(call obj,$(AUD_SRCS))
-APP_OBJS := $(call obj,$(APP_SRCS))
 
-.PHONY: all tools test clean check-static
+RTLSDR_SRCS   := $(wildcard src/usb/*.cpp) $(wildcard src/rtlsdr/*.cpp)
+DSP_SRCS      := $(wildcard src/dsp/*.cpp)
+DECODERS_SRCS := $(wildcard src/decoders/*.cpp)
+AUDIO_SRCS    := $(wildcard src/audio/*.cpp)
+APP_SRCS      := $(wildcard src/app/*.cpp)
+GFX_SRCS      := $(addprefix $(GRAPHICX)/src/,graphicx.cpp terminal.cpp color.cpp canvas.cpp ui.cpp widgets.cpp)
+
+LIB_RTLSDR   := build/lib/liboffgrid-rtlsdr.a
+LIB_DSP      := build/lib/liboffgrid-dsp.a
+LIB_DECODERS := build/lib/liboffgrid-decoders.a
+LIB_AUDIO    := build/lib/liboffgrid-audio.a
+LIB_GFX      := build/lib/libgraphicx.a
+LIBS         := $(LIB_RTLSDR) $(LIB_DSP) $(LIB_DECODERS) $(LIB_AUDIO)
+
+TESTS    := $(patsubst tests/%.cpp,bin/%,$(wildcard tests/test_*.cpp))
+EXAMPLES := $(patsubst examples/%.cpp,bin/example-%,$(wildcard examples/*.cpp))
+
+.PHONY: all libs examples tools test install clean check-static
 
 all: bin/offgrid
 
-bin/offgrid: $(APP_OBJS) $(DSP_OBJS) $(DRV_OBJS) $(AUD_OBJS) $(GFX_OBJS)
+libs: $(LIBS)
+
+$(LIB_RTLSDR): $(call obj,$(RTLSDR_SRCS))
+$(LIB_DSP): $(call obj,$(DSP_SRCS))
+$(LIB_DECODERS): $(call obj,$(DECODERS_SRCS))
+$(LIB_AUDIO): $(call obj,$(AUDIO_SRCS))
+$(LIB_GFX): $(call obj,$(GFX_SRCS))
+build/lib/%.a:
+	@mkdir -p $(dir $@)
+	rm -f $@
+	ar rcs $@ $^
+
+# Link order: users before what they use (decoders need dsp's FFT).
+bin/offgrid: $(call obj,$(APP_SRCS)) $(LIB_DECODERS) $(LIB_DSP) $(LIB_RTLSDR) $(LIB_AUDIO) $(LIB_GFX)
 	@mkdir -p bin
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(SYSLIBS) -o $@
+
+examples: $(EXAMPLES)
+
+bin/example-%: build/examples/%.o $(LIBS)
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< $(LIB_DECODERS) $(LIB_DSP) $(LIB_RTLSDR) $(LIB_AUDIO) $(SYSLIBS) -o $@
 
 tools: bin/rtl-probe
 
-bin/rtl-probe: build/tools/rtl-probe.o $(DRV_OBJS)
+bin/rtl-probe: build/tools/rtl-probe.o $(LIB_RTLSDR)
 	@mkdir -p bin
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(SYSLIBS) -o $@
 
-bin/test-dsp: build/tests/test_dsp.o $(DSP_OBJS)
+bin/test_%: build/tests/test_%.o $(LIB_DECODERS) $(LIB_DSP)
 	@mkdir -p bin
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(SYSLIBS) -o $@
 
-test: bin/test-dsp
-	./bin/test-dsp
+test: $(TESTS)
+	@set -e; for t in $(TESTS); do echo "== $$t"; ./$$t | tail -3; done
 
 build/gfx/%.o: $(GRAPHICX)/%.cpp
 	@mkdir -p $(dir $@)
@@ -76,6 +108,12 @@ build/gfx/%.o: $(GRAPHICX)/%.cpp
 build/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+install: $(LIBS)
+	mkdir -p $(PREFIX)/lib $(PREFIX)/include/offgrid
+	cp $(LIBS) $(PREFIX)/lib/
+	for d in usb rtlsdr dsp decoders audio; do \
+	  mkdir -p $(PREFIX)/include/offgrid/$$d; cp src/$$d/*.h $(PREFIX)/include/offgrid/$$d/; done
 
 check-static: bin/offgrid
 ifeq ($(UNAME),Darwin)

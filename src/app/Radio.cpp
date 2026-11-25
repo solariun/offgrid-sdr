@@ -38,7 +38,8 @@ RadioSettings::RadioSettings()
       biasTee(false),
       muted(false),
       fftSize(2048),
-      directSampling(0) {}
+      directSampling(0),
+      decoderShift(0) {}
 
 Snapshot::Snapshot()
     : spectrumSerial(0),
@@ -53,7 +54,10 @@ Snapshot::Snapshot()
       samplesDropped(0),
       dspLoad(0),
       sampleRateMeasured(0),
-      overload(false) {}
+      overload(false),
+      carrierHz(0),
+      decoderOn(false),
+      decoderKind(dec::Kind::Cw) {}
 
 Radio::Radio(std::unique_ptr<Source> source, std::unique_ptr<audio::AudioOutput> audio)
     : source_(std::move(source)),
@@ -64,6 +68,10 @@ Radio::Radio(std::unique_ptr<Source> source, std::unique_ptr<audio::AudioOutput>
       flushAudio_(false),
       center_(0),
       running_(false),
+      decoderWanted_(false),
+      decoderDirty_(false),
+      decoderReset_(false),
+      decoderKind_(dec::Kind::Cw),
       wav_(0),
       wavFrames_(0) {}
 
@@ -112,7 +120,7 @@ void Radio::stop() {
 void Radio::applyReceiver() {
     dsp::ReceiverConfig c;
     c.sampleRate = source_->sampleRate();
-    c.offsetHz = offset();
+    c.offsetHz = offset() - settings_.decoderShift;
     c.mode = settings_.mode;
     c.bandwidthHz = settings_.bandwidth;
     c.stereo = settings_.stereo;
@@ -141,6 +149,7 @@ void Radio::tune(double hz) {
         flushAudio_ = true;
     }
     receiverDirty_ = true;
+    decoderReset_ = true;  // a new signal: the decoder starts again
 }
 
 void Radio::setMode(dsp::Mode m) {
@@ -203,6 +212,38 @@ std::string Radio::sourceName() const { return source_->name(); }
 std::string Radio::audioName() const { return audio_->name(); }
 std::vector<double> Radio::gains() const { return source_->gains(); }
 bool Radio::tunable() const { return source_->tunable(); }
+
+// ----------------------------------------------------------------- decoders --
+
+void Radio::setDecoder(bool on, dec::Kind kind) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    decoderWanted_ = on;
+    decoderKind_ = kind;
+    decoderDirty_ = true;
+}
+
+void Radio::setDecoderShift(double hz) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    settings_.decoderShift = hz;
+    receiverDirty_ = true;
+}
+
+void Radio::resetDecoder() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    decoderReset_ = true;
+}
+
+void Radio::takeDecoderText(std::string& out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out += decText_;
+    decText_.clear();
+}
+
+void Radio::takeDecoderColumns(std::vector<std::vector<float> >& out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out.insert(out.end(), decColumns_.begin(), decColumns_.end());
+    decColumns_.clear();
+}
 
 // ---------------------------------------------------------------- recording --
 
@@ -308,6 +349,16 @@ void Radio::loop() {
                 audio_->flush();
                 flushAudio_ = false;
             }
+            if (decoderDirty_) {
+                decoderDirty_ = false;
+                if (decoderWanted_) decoder_ = dec::makeDecoder(decoderKind_);
+                else decoder_.reset();
+                decoderReset_ = false;
+            }
+            if (decoderReset_) {
+                decoderReset_ = false;
+                if (decoder_) decoder_->reset();
+            }
         }
         // Overload: count samples at the very ends of the 8-bit range.
         for (size_t i = 0; i < block.size(); i += 16) {
@@ -325,6 +376,17 @@ void Radio::loop() {
         if (wav_) {
             std::lock_guard<std::mutex> lock(mutex_);
             writeWav(audio);
+        }
+        // The decoder listens to the receiver's tap (before squelch / volume).
+        std::string text;
+        std::vector<std::vector<float> > columns;
+        dec::Status decStatus;
+        if (decoder_) {
+            const std::vector<float>& tap = receiver_->decoderAudio();
+            if (!tap.empty()) decoder_->process(&tap[0], tap.size(), audio_->rate());
+            decoder_->takeText(text);
+            if (decoder_->hasImage()) decoder_->takeColumns(columns);
+            decStatus = decoder_->status();
         }
 
         Clock::time_point end = Clock::now();
@@ -345,6 +407,18 @@ void Radio::loop() {
         snap_.squelchOpen = receiver_->squelchOpen();
         if (settings_.mode == dsp::Mode::WFM) snap_.rds = receiver_->rds();
         else snap_.rds = dsp::RdsInfo();
+        snap_.carrierHz = receiver_->carrierOffsetHz();
+        snap_.decoderOn = decoder_ != 0;
+        snap_.decoderKind = decoder_ ? decoder_->kind() : decoderKind_;
+        snap_.decoder = decStatus;
+        if (!text.empty()) {
+            decText_ += text;
+            if (decText_.size() > 65536) decText_.erase(0, decText_.size() - 65536);
+        }
+        if (!columns.empty()) {
+            decColumns_.insert(decColumns_.end(), columns.begin(), columns.end());
+            if (decColumns_.size() > 4000) decColumns_.erase(decColumns_.begin(), decColumns_.end() - 4000);
+        }
         snap_.audioQueued = audio_->queuedSeconds();
         snap_.audioUnderruns = audio_->underruns();
         snap_.samplesDropped = source_->queue().dropped();

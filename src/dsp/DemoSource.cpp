@@ -267,6 +267,42 @@ struct CwEnvelope : Envelope {
     }
 };
 
+// Any audio as a one-sided (USB) signal: the audio, resampled to the
+// station's envelope rate, plus j times its Hilbert transform (a 127-tap
+// windowed FIR; the real part is delayed by the same 63 samples).  Upper
+// sideband only, so a USB receiver tuned below it hears the audio again.
+// The audio loops.
+struct AudioUsbEnvelope : Envelope {
+    std::vector<float> audio;   // the programme, at audioRate
+    double pos, step;           // read position and increment (audio samples)
+    std::vector<float> taps;    // Hilbert transformer
+    std::vector<float> hist;    // last 127 input samples (ring)
+    std::size_t at;
+    AudioUsbEnvelope(const std::vector<float>& a, double audioRate, double envRate)
+        : audio(a), pos(0), step(audioRate / envRate), taps(127), hist(127, 0.0f), at(0) {
+        if (audio.empty()) audio.assign(1, 0.0f);
+        for (int k = 0; k < 127; ++k) {
+            const int m = 63 - k;  // tap k multiplies x[n - (126 - k)]: lag 126 - k, centred on 63
+            const double w = 0.42 - 0.5 * std::cos(2 * kPi * k / 126.0) + 0.08 * std::cos(4 * kPi * k / 126.0);
+            taps[static_cast<std::size_t>(k)] = (m % 2 == 0) ? 0.0f : static_cast<float>(2.0 / (kPi * m) * w);
+        }
+    }
+    Complex next() {
+        const std::size_t i0 = static_cast<std::size_t>(pos);
+        const double f = pos - i0;
+        const float x = static_cast<float>(audio[i0 % audio.size()] * (1 - f) + audio[(i0 + 1) % audio.size()] * f);
+        pos += step;
+        if (pos >= audio.size()) pos -= audio.size();
+        hist[at] = x;
+        at = (at + 1) % hist.size();
+        // hist[at] is now the oldest sample; tap k multiplies x[n - 126 + k].
+        float h = 0;
+        for (std::size_t k = 0; k < taps.size(); k += 2) h += taps[k] * hist[(at + k) % hist.size()];  // odd lags only (even k)
+        const float delayed = hist[(at + 63) % hist.size()];
+        return Complex(delayed, h);
+    }
+};
+
 // ---- Stations ------------------------------------------------------------------
 struct Station {
     virtual ~Station() {}
@@ -411,6 +447,14 @@ struct DemoSource::Impl {
     std::vector<DemoStation> list;
     std::vector<Station*> gens;
     std::vector<float> re, im;
+    struct Extra {
+        double hz;
+        std::vector<float> audio;
+        double audioRate, levelDb;
+        Mode mode;
+        std::string name;
+    };
+    std::vector<Extra> extras;  // added with addAudioStation(); placed by build()
 
     Impl(double rate, double c) : fs(rate > 0 ? rate : 2048000), center(c), noiseRng(0x5DEECE66DULL) {
         // -42 dBFS of noise in total: a realistic floor, and enough (0.7 LSB
@@ -508,6 +552,20 @@ struct DemoSource::Impl {
                 }
             }
         }
+        // Audio stations added by the program (decoder signals and the like).
+        const int dAud = std::max(1, static_cast<int>(std::floor(fs / 48000.0 + 0.5)));
+        for (std::size_t k = 0; k < extras.size(); ++k) {
+            const Extra& x = extras[k];
+            if (std::fabs(x.hz - center) > half) continue;
+            gens.push_back(new EnvelopeStation(fs, x.hz - center, dbToLin(x.levelDb), dAud,
+                                               new AudioUsbEnvelope(x.audio, x.audioRate, fs / dAud)));
+            DemoStation st;
+            st.offsetHz = x.hz - center;
+            st.mode = x.mode;
+            st.name = x.name;
+            st.levelDb = x.levelDb;
+            list.push_back(st);
+        }
     }
 
     void generate(std::size_t n, std::vector<std::uint8_t>& bytes) {
@@ -542,6 +600,19 @@ void DemoSource::setCenter(double centerHz) {
 }
 
 const std::vector<DemoStation>& DemoSource::stations() const { return impl_->list; }
+
+void DemoSource::addAudioStation(double hz, const std::vector<float>& audio, double audioRate, double levelDb, Mode mode,
+                                 const std::string& name) {
+    Impl::Extra x;
+    x.hz = hz;
+    x.audio = audio;
+    x.audioRate = audioRate;
+    x.levelDb = levelDb;
+    x.mode = mode;
+    x.name = name;
+    impl_->extras.push_back(x);
+    impl_->build();
+}
 
 void DemoSource::generate(std::size_t n, std::vector<std::uint8_t>& bytes) { impl_->generate(n, bytes); }
 
