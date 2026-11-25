@@ -40,6 +40,16 @@
 //            DSC frequency (a 1 bit, "B", is the lower tone)
 //    PSK     the tone at 1000 Hz ±50 Hz (dial 1 kHz below the PSK frequency)
 //    HELL    the tone at 1000 Hz
+//    FAX     1500 Hz (black) .. 2300 Hz (white), centre 1900 (USB dial 1.9 kHz
+//            below the listed frequency; start/stop tones swing at 300/450 Hz)
+//    SSTV    1500 .. 2300 Hz video, 1200 Hz sync, VIS 1100/1300 Hz (the dial ON
+//            the listed frequency: USB, but LSB on the 40/80/160 m ham bands
+//            (7.171, 3.845 MHz), narrowband FM above 30 MHz (ISS 145.800))
+//    TIME    the carrier at 1000 Hz, found anywhere 700-1300 Hz (dial 1 kHz
+//            below the station; CHU's code needs audio to ~3.3 kHz; Time.h)
+//    AX25    packet/APRS: 1200 Bd AFSK 1200/2200 Hz in NFM audio, dial on the
+//            channel; 300 Bd 1600/1800 Hz in USB, dial on the listed dial
+//            frequency; 9600 Bd G3RUH needs flat FM discriminator audio (Ax25.h)
 //
 //  How it fits in
 //  --------------
@@ -57,13 +67,15 @@
 
 namespace dec {
 
-enum class Kind { Cw, Rtty, Psk, Navtex, Dsc, Hell };
-const char* kindName(Kind kind);              // "CW", "RTTY", "PSK", "NAVTEX", "DSC", "HELL"
+enum class Kind { Cw, Rtty, Psk, Navtex, Dsc, Hell, Fax, Sstv, Time, Ax25 };
+const char* kindName(Kind kind);  // "CW", "RTTY", "PSK", "NAVTEX", "DSC", "HELL", "FAX", "SSTV", "TIME"
 bool parseKind(const std::string& name, Kind& kind);  // case-insensitive
 
 // What a decoder reports about the signal it is following.
 struct Status {
-    Status() : locked(false), signal(false), snrDb(0), quality(0), toneHz(0), shiftHz(0), baud(0), wpm(0), characters(0) {}
+    Status()
+        : locked(false), signal(false), snrDb(0), quality(0), toneHz(0), shiftHz(0), baud(0), wpm(0), characters(0),
+          pictureWidth(0), pictureHeight(0), pictureRow(0), timeValid(false), clockOffset(0), clockError(0), stationTime(0) {}
     bool locked;          // decoding (in sync with a signal)
     bool signal;          // a signal of the right kind is present
     double snrDb;         // signal to noise, dB (0 when unknown)
@@ -75,6 +87,27 @@ struct Status {
     unsigned characters;  // characters decoded since reset()
     std::string mode;     // detail, e.g. "PSK63", "RTTY 45.45/170", "NAVTEX"
     std::string info;     // one line for a status bar, e.g. "24 WPM  SNR 18 dB"
+
+    // Picture decoders (FAX, SSTV): the picture being received.
+    int pictureWidth;     // pixels per line (0 = no picture yet)
+    int pictureHeight;    // lines expected (0 = open-ended, e.g. a fax chart)
+    int pictureRow;       // lines received so far of the current picture
+
+    // Time decoder: how far the computer's clock is from the station's.
+    bool timeValid;       // a full time code has been read
+    double clockOffset;   // station time - computer time, seconds
+    double clockError;    // its uncertainty, seconds (e.g. 0.005)
+    double stationTime;   // the station's time now, Unix seconds (UTC)
+    std::string station;  // "CHU", "WWV", "WWVH", "RWM"
+};
+
+// One line of a picture (FAX, SSTV).  `picture` counts the pictures since
+// reset() (a new number = a new picture; the program saves the old one);
+// `row` is the line's index in it; `rgb` holds width x 3 bytes.
+struct PictureLine {
+    unsigned picture;
+    int row;
+    std::vector<unsigned char> rgb;
 };
 
 class Decoder {
@@ -98,6 +131,15 @@ public:
     // call, each a vector of brightness values 0..1 from top to bottom.
     virtual bool hasImage() const { return false; }
     virtual void takeColumns(std::vector<std::vector<float> >& columns) { (void)columns; }
+
+    // Picture decoders (FAX, SSTV): the lines received since the last call.
+    virtual bool hasPicture() const { return false; }
+    virtual void takeLines(std::vector<PictureLine>& lines) { (void)lines; }
+
+    // Time decoders: the computer's clock (Unix seconds, UTC) at the first
+    // sample of the next process() call.  Programs call it before every
+    // process(); other decoders ignore it.
+    virtual void setTimestamp(double unixSeconds) { (void)unixSeconds; }
 };
 
 // A decoder of the given kind with its default settings.

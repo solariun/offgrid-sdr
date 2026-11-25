@@ -215,10 +215,11 @@ bool Radio::tunable() const { return source_->tunable(); }
 
 // ----------------------------------------------------------------- decoders --
 
-void Radio::setDecoder(bool on, dec::Kind kind) {
+void Radio::setDecoder(bool on, dec::Kind kind, std::function<void(dec::Decoder&)> setup) {
     std::lock_guard<std::mutex> lock(mutex_);
     decoderWanted_ = on;
     decoderKind_ = kind;
+    decoderSetup_ = setup;
     decoderDirty_ = true;
 }
 
@@ -237,6 +238,12 @@ void Radio::takeDecoderText(std::string& out) {
     std::lock_guard<std::mutex> lock(mutex_);
     out += decText_;
     decText_.clear();
+}
+
+void Radio::takeDecoderLines(std::vector<dec::PictureLine>& out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out.insert(out.end(), decLines_.begin(), decLines_.end());
+    decLines_.clear();
 }
 
 void Radio::takeDecoderColumns(std::vector<std::vector<float> >& out) {
@@ -336,7 +343,8 @@ void Radio::loop() {
     unsigned rails = 0, railsTotal = 0;
 
     while (running_) {
-        if (!source_->queue().pop(block, 50)) continue;
+        double arrived = 0;
+        if (!source_->queue().pop(block, 50, &arrived)) continue;
         Clock::time_point begin = Clock::now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -351,13 +359,19 @@ void Radio::loop() {
             }
             if (decoderDirty_) {
                 decoderDirty_ = false;
-                if (decoderWanted_) decoder_ = dec::makeDecoder(decoderKind_);
+                if (decoderWanted_) {
+                    decoder_ = dec::makeDecoder(decoderKind_);
+                    if (decoder_ && decoderSetup_) decoderSetup_(*decoder_);
+                }
                 else decoder_.reset();
                 decoderReset_ = false;
             }
             if (decoderReset_) {
                 decoderReset_ = false;
-                if (decoder_) decoder_->reset();
+                if (decoder_) {
+                    decoder_->reset();
+                    if (decoderSetup_) decoderSetup_(*decoder_);  // settings that reset() may clear
+                }
             }
         }
         // Overload: count samples at the very ends of the 8-bit range.
@@ -380,10 +394,16 @@ void Radio::loop() {
         // The decoder listens to the receiver's tap (before squelch / volume).
         std::string text;
         std::vector<std::vector<float> > columns;
+        std::vector<dec::PictureLine> lines;
         dec::Status decStatus;
         if (decoder_) {
             const std::vector<float>& tap = receiver_->decoderAudio();
+            // The computer's clock at this block's first sample (time
+            // decoders): when the block arrived (= its last sample), minus
+            // its length.  The receiver's filters add a few ms (constant).
+            decoder_->setTimestamp(arrived - static_cast<double>(iq.size()) / source_->sampleRate());
             if (!tap.empty()) decoder_->process(&tap[0], tap.size(), audio_->rate());
+            if (decoder_->hasPicture()) decoder_->takeLines(lines);
             decoder_->takeText(text);
             if (decoder_->hasImage()) decoder_->takeColumns(columns);
             decStatus = decoder_->status();
@@ -414,6 +434,10 @@ void Radio::loop() {
         if (!text.empty()) {
             decText_ += text;
             if (decText_.size() > 65536) decText_.erase(0, decText_.size() - 65536);
+        }
+        if (!lines.empty()) {
+            decLines_.insert(decLines_.end(), lines.begin(), lines.end());
+            if (decLines_.size() > 8000) decLines_.erase(decLines_.begin(), decLines_.end() - 8000);
         }
         if (!columns.empty()) {
             decColumns_.insert(decColumns_.end(), columns.begin(), columns.end());

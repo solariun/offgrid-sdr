@@ -46,10 +46,10 @@ obj = $(patsubst %.cpp,build/%.o,$(subst $(GRAPHICX)/,gfx/,$(1)))
 
 RTLSDR_SRCS   := $(wildcard src/usb/*.cpp) $(wildcard src/rtlsdr/*.cpp)
 DSP_SRCS      := $(wildcard src/dsp/*.cpp)
-DECODERS_SRCS := $(wildcard src/decoders/*.cpp)
+DECODERS_SRCS := $(wildcard src/decoders/*.cpp) $(wildcard src/decoders/ax25/*.cpp)
 AUDIO_SRCS    := $(wildcard src/audio/*.cpp)
 APP_SRCS      := $(wildcard src/app/*.cpp)
-GFX_SRCS      := $(addprefix $(GRAPHICX)/src/,graphicx.cpp terminal.cpp color.cpp canvas.cpp ui.cpp widgets.cpp)
+GFX_SRCS      := $(addprefix $(GRAPHICX)/src/,graphicx.cpp terminal.cpp color.cpp canvas.cpp ui.cpp widgets.cpp png.cpp)
 
 LIB_RTLSDR   := build/lib/liboffgrid-rtlsdr.a
 LIB_DSP      := build/lib/liboffgrid-dsp.a

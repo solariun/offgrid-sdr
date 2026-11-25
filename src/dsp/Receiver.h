@@ -160,11 +160,15 @@ public:
     const std::vector<DemoStation>& stations() const;
 
     // Adds a station that sends `audio` (mono, at audioRate, looped) as an
-    // upper-sideband signal whose suppressed carrier is at `hz`: a USB
-    // receiver tuned to `hz` hears the audio.  Used for decoder signals
+    // upper-sideband signal whose suppressed carrier is at `hz` (a USB
+    // receiver tuned to `hz` hears the audio), or, with mode NFM, as narrow
+    // FM on a carrier at `hz` (5 kHz deviation per unit of audio).  Used for decoder signals
     // (RTTY, PSK, NAVTEX ...) made by the program.  levelDb: peak level, dBFS.
+    // wallClockStart (optional): the computer's time (Unix seconds) of the
+    // audio's first sample; the station then plays in step with the clock
+    // (each rebuild starts it at the sample for "now"), e.g. time signals.
     void addAudioStation(double hz, const std::vector<float>& audio, double audioRate, double levelDb, Mode mode,
-                         const std::string& name);
+                         const std::string& name, double wallClockStart = 0);
 
     // Next `n` samples (with noise), as unsigned 8-bit IQ like a stick, so
     // the whole chain is exercised.

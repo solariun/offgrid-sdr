@@ -25,6 +25,7 @@
 #define OFFGRID_APP_RADIO_H
 
 #include <atomic>
+#include <functional>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -103,12 +104,15 @@ public:
     void setFftSize(int n);
 
     // Text / picture decoder on the demodulated sound (liboffgrid-decoders).
-    void setDecoder(bool on, dec::Kind kind = dec::Kind::Cw);
+    // setup (optional) runs on the new decoder before its first sample, on the
+    // DSP thread: decoder-specific settings (AX.25 speed, time station ...).
+    void setDecoder(bool on, dec::Kind kind = dec::Kind::Cw, std::function<void(dec::Decoder&)> setup = std::function<void(dec::Decoder&)>());
     void setDecoderShift(double hz);
     void resetDecoder();
     // New decoded text / Hell columns since the last call (UI thread).
     void takeDecoderText(std::string& out);
     void takeDecoderColumns(std::vector<std::vector<float> >& out);
+    void takeDecoderLines(std::vector<dec::PictureLine>& out);  // FAX, SSTV
 
     // Records the demodulated sound (16-bit stereo WAV at the audio rate).
     bool startRecording(const std::string& path, std::string& error);
@@ -146,8 +150,10 @@ private:
     std::unique_ptr<dec::Decoder> decoder_;
     bool decoderWanted_, decoderDirty_, decoderReset_;
     dec::Kind decoderKind_;
+    std::function<void(dec::Decoder&)> decoderSetup_;
     std::string decText_;                          // waiting for the UI
     std::vector<std::vector<float> > decColumns_;  // waiting for the UI
+    std::vector<dec::PictureLine> decLines_;       // waiting for the UI
 
     // WAV recording (guarded by mutex_; written by the DSP thread).
     void writeWav(const std::vector<float>& audio);

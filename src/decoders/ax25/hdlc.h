@@ -1,0 +1,139 @@
+// ============================================================================
+//  offgrid-decoders - reusable C++11 decoders for radio text and picture
+//  modes (part of OFFgrid-SDR TUI, https://github.com/solariun/offgrid-sdr).
+//  SPDX-License-Identifier: GPL-3.0-or-later
+// ----------------------------------------------------------------------------
+//  File:   src/decoders/ax25/hdlc.h
+//  Layer:  Library liboffgrid-decoders (internal header of the AX.25 decoder)
+//
+//  Where this file comes from
+//  --------------------------
+//  Copied from AX25Toolkit by Gustavo Campos (kiss_modem/hdlc.h,
+//  https://github.com/solariun/AX25Toolkit), used with the author's
+//  permission; the FCS table and algorithm come from Dire Wolf by John
+//  Langner, WB2OSZ (https://github.com/wb2osz/direwolf, GPLv2 or later).
+//  Original header comment kept below.
+//
+//  What this file does
+//  -------------------
+//  HDLC framing of AX.25 packets, both ways:
+//    hdlc::Decoder  bits (already NRZI-decoded by the demodulator) in;
+//                   flags found, stuffed 0s removed, the frame check
+//                   (CRC-16-CCITT, "FCS") tested; good frames out.
+//    hdlc::Encoder  a frame in; flags, the frame and its FCS bit-stuffed,
+//                   NRZI-encoded bits out (1 = mark tone, 0 = space).
+//
+//  Changes from AX25Toolkit (marked "OFFgrid:" in hdlc.cpp):
+//    - namespace hdlc -> dec::hdlc;
+//    - Encoder::send_frame can leave the FCS to the caller (tests send
+//      frames with a wrong one);
+//    - the decoder accepts a frame only when the closing flag ends on a byte
+//      boundary (as OFFgrid-SDR's JS decoder does): 8 times fewer chances for
+//      noise to pass the 16-bit FCS by luck.
+//
+//  How it fits in
+//  --------------
+//  Used by Ax25.cpp (decoding) and Ax25Encoders.cpp (synthesis).
+//
+//  Contributing
+//  ------------
+//  Keep in step with AX25Toolkit; no allocation per bit; strict C++11.
+// ============================================================================
+//
+// HDLC framing for AX.25: bit stuffing, FCS/CRC16-CCITT, frame assembly
+// FCS algorithm derived from Dire Wolf by John Langner, WB2OSZ (GPLv2)
+// Simplified for kiss_modem: single-channel, C++ classes, no global state
+#ifndef OFFGRID_DECODERS_AX25_HDLC_H
+#define OFFGRID_DECODERS_AX25_HDLC_H
+#include <cstdint>
+#include <cstddef>
+#include <functional>
+#include <vector>
+
+namespace dec {
+namespace hdlc {
+
+// ---------------------------------------------------------------------------
+//  CRC16-CCITT (FCS) — same polynomial & table as Direwolf / AX.25 spec
+// ---------------------------------------------------------------------------
+uint16_t fcs_calc(const uint8_t* data, size_t len);
+
+// ---------------------------------------------------------------------------
+//  HDLC Decoder — bit-stream to AX.25 frames
+// ---------------------------------------------------------------------------
+//  Feed demodulated bits one at a time.  When a complete frame with valid
+//  FCS is assembled the on_frame callback fires with the raw AX.25 bytes
+//  (FCS stripped).
+//
+//  Implements: flag (0x7E) detection, NRZI decode, bit-unstuffing, FCS check.
+
+class Decoder {
+public:
+    using FrameCb = std::function<void(const uint8_t* data, size_t len)>;
+
+    void init();
+
+    // Feed one demodulated bit (after NRZI decode).
+    // `raw` is the NRZI-decoded bit value (0 or 1).
+    void receive_bit(int raw);
+
+    void set_on_frame(FrameCb cb) { on_frame_ = cb; }
+    void set_debug(int level) { debug_ = level; }
+
+private:
+    static constexpr int MAX_FRAME = 330;  // 256 info + 14 addr + ctrl + pid + 2 FCS + margin
+    static constexpr uint8_t FLAG = 0x7E;
+
+    FrameCb on_frame_;
+    int     debug_ = 0;   // 0=off, 3=verbose (FCS fail, abort)
+
+    uint8_t pat_det_;          // 8-bit shift register for flag detection
+    int     olen_;             // output bit counter within current byte
+    uint8_t oacc_;             // output byte accumulator
+    int     frame_len_;        // bytes assembled so far
+    uint8_t frame_buf_[MAX_FRAME];
+    int     consecutive_ones_; // for bit-unstuffing
+    bool    collecting_;       // true after opening flag detected
+};
+
+// ---------------------------------------------------------------------------
+//  HDLC Encoder — AX.25 frame to bit-stream
+// ---------------------------------------------------------------------------
+//  Given a raw AX.25 frame (without FCS), produces the full HDLC bit-stream:
+//    opening flags | data (bit-stuffed, NRZI) | FCS (bit-stuffed, NRZI) | closing flag
+//
+//  Call encode() to get a vector of audio-ready bits, or use send_bit callback
+//  for streaming.
+
+class Encoder {
+public:
+    using BitCb = std::function<void(int bit)>;
+
+    void set_on_bit(BitCb cb) { on_bit_ = cb; }
+
+    // Encode a complete frame.  Calls on_bit for each output bit.
+    // `preamble_flags` = number of 0x7E flags before data (typ. 25-40 for 300ms @ 1200 baud)
+    // `postamble_flags` = trailing flags (typ. 2)
+    // OFFgrid: append_fcs false sends `data` as given (its last 2 bytes
+    // taken as the FCS, right or wrong: for tests).
+    void send_frame(const uint8_t* data, size_t len, int preamble_flags = 30, int postamble_flags = 2,
+                    bool append_fcs = true);
+
+    // Convenience: returns all bits as a vector
+    std::vector<int> encode(const uint8_t* data, size_t len, int preamble_flags = 30, int postamble_flags = 2);
+
+private:
+    BitCb on_bit_;
+    int   nrzi_state_ = 0;   // current NRZI output level
+    int   ones_count_ = 0;   // consecutive 1s for bit-stuffing
+
+    void send_flag();
+    void send_byte_nrzi(uint8_t byte, bool stuff);
+    void send_bit_nrzi(int bit);
+    void send_bit_raw(int bit);   // after NRZI: calls on_bit_
+};
+
+}  // namespace hdlc
+}  // namespace dec
+
+#endif

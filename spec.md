@@ -1,4 +1,4 @@
-# OFFgrid-SDR TUI — Specification (SDD), v0.2.0
+# OFFgrid-SDR TUI — Specification (SDD), v0.3.0
 
 **What it is.** `offgrid` is a C++11 port of OFFgrid-SDR, the single-file browser receiver by diddy-boy, to a
 **text terminal on Linux and macOS**. It drives an RTL-SDR stick through **its own driver** (no librtlsdr, no
@@ -8,7 +8,9 @@ mode buttons, lights, S-meter, spectrum, waterfall, band list, controls, RDS, st
 painter and a widget toolkit (§9). It builds into **one binary with no third-party libraries**: fully static on
 Linux, OS libraries only on macOS (§0.2 D6).
 
-**Status (2026-11-25): phase 1 committed (`46da55f`); phase 2 built, measured and committed.** Phase 2 adds
+**Status (2026-11-25): phases 1 (`46da55f`), 2 (`254ddd6`) and 3 committed.**
+Phase 3 adds weather fax, SSTV, time signals with the clock correction, AX.25/APRS (on Gustavo's AX25Toolkit, brought
+forward from phase 4 at his request), PNG pictures, and full mouse use (D14). Phase 2 adds
 six decoders (CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber), memories, frequency labels, a logbook, a settings
 file, scanning and frequency calibration, and splits the code into four reusable static libraries (D11). Built: the USB layer (Linux
 usbfs, macOS IOKit), the RTL-SDR driver (RTL2832U + R820T/R820T2/R828D, Blog V4 inputs), the DSP chain (WFM stereo
@@ -31,6 +33,8 @@ file and the code disagree, the disagreement is a defect to be resolved here fir
 |---|---|
 | 2026-11-25 | **Phase 1 written**: `src/usb`, `src/rtlsdr`, `src/dsp`, `src/audio`, `src/app`, `tools/rtl-probe.cpp`, `tests/test_dsp.cpp`, `Makefile`, `TUI.md`, this file; Graphicx added as the submodule `external/Graphicx`; README.MD points to TUI.md. |
 | 2026-11-25 | **Graphicx extended** (Graphicx `c06f4d5`, the submodule's commit): `color.h` (colormaps, themes), `canvas.h` (pixel drawing, two fonts), `ui.h` (Surface, Painter, DotCanvas, Display, layout), `widgets.h` (App and ~25 widgets), events and mouse in `terminal.h`; `tests/test_ui.cpp` (124 checks), `examples/canvas.cpp`, `examples/dashboard.cpp`. The existing picture API is unchanged (its 62 checks still pass). |
+| 2026-11-25 | **Phase 3** (Graphicx `b03690b`): `src/decoders/Fax.*`, `Sstv.*`, `PictureEncoders.*`, `Time.*`, `Clock.*`, `TimeEncoders.*`, `Ax25.*`, `Ax25Aprs.cpp`, `Ax25Encoders.*`, `ax25/` (modem, HDLC, frames from AX25Toolkit); tests `test_decoders_picture.cpp`, `test_decoders_time.cpp`, `test_decoders_ax25.cpp`; `src/app/DecoderPlan.*`; Decoder.h gains `Kind::Fax/Sstv/Time/Ax25`, `PictureLine`, `takeLines`, `setTimestamp` and the picture/time fields of `Status`; SampleQueue stamps each block's arrival time; Radio gains a decoder setup hook and picture lines; the demo band gains fax, SSTV, CHU, WWV and APRS (NFM) stations; the Ui gains the toolbar, prompt buttons, frequency-display mouse actions, the picture panel with PNG saving and the corrected clock; headless saves pictures. Graphicx gains `png.h` (PNG writer with its own deflate). |
+| 2026-11-25 | Defects found in phase 3 and fixed the same day: the toolbar built in `stopDecoder()` instead of `build()` (an edit landed at the wrong match); the prompt's button row on its border (5 rows, now 6); time decoders saw the computer's clock +0.13–0.15 s late (timestamped when processed and the demo's code made before it started: now stamped on arrival and built at start, E28); the stick overloaded on 144.8 MHz with automatic gain (E30). |
 | 2026-11-25 | **Phase 2**: `src/decoders` (liboffgrid-decoders: `Decoder.h` interface + factory, `Cw`, `Rtty`, `Psk`, `Navtex` (+DSC), `Hell`, `Codes`, `FskEncoders`, `PskEncoders`), `tests/test_decoders_fsk.cpp`, `tests/test_decoders_psk.cpp`; `src/app/Store.*`; `examples/fm-radio.cpp`, `examples/decode.cpp`; a README per library; Receiver gains `decoderAudio()` and `carrierOffsetHz()`; DemoSource gains `addAudioStation()` and the demo band carries decoder stations; Radio gains the decoder and the decoder shift (D12); Ui gains the decoder panel, list tabs, prompts, scan, calibration, labels; Makefile builds the libraries. |
 | 2026-11-25 | Defects found in phase 2 and fixed the same day: the demo's Hilbert transformer gave LSB (sign) and then no sideband at all (wrong taps visited) — now USB 37 dB over LSB (E19); the carrier offset wandered ±100 Hz with a 1 s average, then started from a transient with an 8 s one — now a cumulative mean after 0.5 s of settling (E21); Hell's signal flag never rose on a real signal (E20); RTTY re-locked at 75 Bd after noise gaps (P13); `Label` name clash in Ui; tab keys tuned instead of switching tabs. |
 | 2026-11-25 | Defects found while measuring and fixed the same day: the IQ byte count passed as a sample count (half rate, §10 E5); sound "gaps" counted before the first audio arrived (E7); PI printed through a `double` format (E9); overlapping S-meter labels, list scroll bar over text, clipped clock (E10); 8.4 MB/5.6 s of terminal output cut to 2.9 MB (E11). |
@@ -78,6 +82,10 @@ problems (**P**), §12 the plan for the next phases, §13 the glossary. "As buil
 | D11 | **Reusable libraries.** `liboffgrid-rtlsdr` (usb + rtlsdr), `liboffgrid-dsp`, `liboffgrid-decoders`, `liboffgrid-audio`, each with public headers, a README and no dependency on the program; the decoders depend only on the standard library and the DSP library's FFT; every decoder also has its own header. | Gustavo (2026-11-25): "make every decoder and appliable a lib so it can be reused in the future". |
 | D12 | **In decoder modes the dial shows the signal's frequency**; the receiver is tuned below it by the decoder's audio centre (RTTY/NAVTEX/DSC 1500 Hz, PSK/HELL 1000 Hz; CW none). | As the browser version (`modeShift`), so listed frequencies are typed as they are. |
 | D13 | **Settings in `$XDG_CONFIG_HOME/offgrid/settings.ini` (else `~/.config/offgrid`), the log in `logbook.csv` there**; plain text, saved on exit by a write-then-rename. The command line overrides saved settings; `--fresh` ignores them. | Human-readable, editable, no library. |
+| D14 | **Everything by mouse too.** A toolbar for every keyboard-only action; OK/Cancel in prompts; click the frequency to type one, wheel over it to tune; click the decoder panel title for the decoder menu. | Gustavo (2026-11-25): "also make sure I can use mouse". |
+| D15 | **AX.25 from AX25Toolkit.** The modem (Dire Wolf-derived), HDLC and frame code are copied into `src/decoders/ax25/` with their headers, adapted minimally (namespaces, float input, multi-slicer, two undefined-behaviour fixes); APRS interpretation ported from the browser version. | Gustavo: "also add the ax25 decoding you can also use the AX25ToolKit from my repos". AX25Toolkit has no LICENSE file (P16); Dire Wolf is GPL-2.0-or-later, compatible with D3. |
+| D16 | **Pictures are saved as PNG** where offgrid was started (`offgrid-FAX-…png`, `offgrid-SSTV-…png`), when the next picture starts, the decoder stops or the program ends; also headless. | The browser version archives fax charts; PNG via Graphicx's own encoder keeps D5. |
+| D17 | **The clock correction is kept in `clock.txt`** (`dec::ClockCorrection::save()`), with the JS sign (offset = PC − true); **T** sets it from a full time code. | Same rules as the browser version (drift from two readings ≥ 0.5 day apart). |
 | D10 | **No Linux cross-compiler was installed** (`brew install zig` declined by Gustavo, 2026-11-25). | Linux code is syntax-checked against stub headers only until a Linux build is run (P1). |
 
 ### 0.3 Development standards: the definition of done
@@ -176,6 +184,16 @@ the settings and each band's last frequency (D13).
 **R11 Scan and calibration.** Band scan in the band's step, memory scan; 0.2 s per channel; stop on squelch (or 12
 dB over the noise when the squelch is off), resume 2 s after. Calibration from the carrier of a known station:
 error = −offset / frequency, added to the ppm correction after confirmation.
+
+**R12 Pictures.** Fax 60/90/120/240 LPM, 1809 px, start/phasing/stop, automatic slant; SSTV Martin M1/M2, Scottie
+S1/S2, PD90, PD120 by VIS; drawn as they arrive; saved as PNG (D16).
+
+**R13 Time.** CHU, WWV/WWVH, RWM: the PC clock's error to ±10 ms (measured ±2.5 ms); blocks time-stamped on arrival;
+the corrected clock shown and kept (D17).
+
+**R14 AX.25.** 1200 Bd (NFM, VHF), 300 Bd (USB, HF), 9600 Bd (flat audio ≥ 38.4 kHz); FCS checked; APRS interpreted.
+
+**R15 Mouse.** Every action reachable with the mouse (D14).
 
 **R8 Headless.** `--headless N`: one status line per second for N seconds (level, noise, measured rate, DSP load,
 sound queue and gaps, drops, stereo, overload, RDS, strongest spectrum peaks).
@@ -314,6 +332,23 @@ tone it finds by FFT before measuring the level (the JS relied on the receiver's
 twin decoder of the opposite polarity and switches when the twin reads better text; text already handed out is
 not taken back. The first characters after a pause are lost while the speed is learned (CW, RTTY), as in the JS.
 
+## 6c. Phase 3 decoders (as built)
+
+**Fax** (`Fax.*`): instantaneous frequency from a 1900 Hz mix; states waiting → start tone (300 Hz) → phasing →
+receiving → stop (450 Hz); lines assembled from two consecutive rows with an absolute start count (the JS rotated
+one row); automatic slant from a line fit of the phasing pulses (≤ 500 ppm, outliers dropped); lines handed out
+1.25 s late so the stop-tone trim can still drop them; `startNow()`, `stop()`, `shift()` for manual use.
+**SSTV** (`Sstv.*`): pitch by a 1750 Hz mix, four 900 Hz low-pass stages, phase step; VIS → mode; line sync and
+drift; the JS's six modes; a fixed 64k pitch ring. **Time** (`Time.*`): carrier found 700–1300 Hz; 5 ms frames;
+tick profile per 5 ms of the second (1000 and 1200 Hz: WWV vs WWVH, an addition — the JS never used the 1200 Hz
+profile); minute marker (CHU candidates refused while its FSK mark is on); CHU's Bell 103 bytes (seconds 31–39),
+WWV's 100 Hz BCD; a single WWV frame accepted only when every bit is clear, else two agreeing frames; the second's
+start at the rising frame's bin start (the JS's was 0–5 ms early); lost samples → `timeJump()`. **Clock**
+(`Clock.*`): the JS clock rules (offset, source, ≤ 12 measurements, drift from two ≥ 0.5 day apart, 3 days for
+hand settings, FT8 nudging). **AX.25** (`Ax25.*`, `ax25/`): up to 5 slicers (Dire Wolf style), DCD, HDLC with FCS
+and byte-boundary closing flag, AX.25 address/control/PID, APRS (positions plain/compressed/Mic-E, weather,
+messages/acks/bulletins, status, objects, items, telemetry, third-party), distance/bearing from a home.
+
 ## 9. Graphicx contract (as built)
 
 The program relies on these Graphicx features, added for it and documented in Graphicx's README (MIT):
@@ -352,6 +387,14 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | E20 | Hell signal flag on the demo station through the radio | was "searching" (contrast 44 % < 0.45); now up 78 of 80 quarter-seconds (down only in the gaps' tails) |
 | E21 | Calibration on the stick, 24 s per station | GLOW FM 94.0 MHz: +43.8 Hz → −0.47 ppm (steady from 4 s: −0.45…−0.49); VERONICA 99.4 MHz: +31.8 Hz → −0.32 ppm; agreement 0.15 ppm (station tolerance, multipath); the NESDR SMArt v5 has a 0.5 ppm TCXO |
 | E22 | `example-fm-radio` (driver + DSP + audio libraries only) on the stick | GLOW FM in stereo with RDS text, through the speakers |
+| E23 | Phase 3 self-tests | `test_decoders_picture` 38/38 (fax 60/120/240 LPM and SSTV ×6 at 48/12 kHz, ±100 ppm sender clock, 20 dB: MAE fax 10–13, SSTV 5–9.5 of 255, aligned; no picture from noise); `test_decoders_time` 128/128 (CHU, WWV, WWVH, RWM at 48/12 kHz with the PC clock −0.4/+2.3 s: offset error 0.0 ms frame-aligned, ≤ 2.75 ms over all alignments; WWV vs WWVH named; lost samples; no time from noise; ClockCorrection drift, save/load); `test_decoders_ax25` 60/60 (7 packets byte-exact at 48/44.1/22.05/12 kHz, ±2 % tone/clock, de-emphasis, 300 and 9600 Bd, bad FCS rejected, APRS fields, no frames from 60 s of noise; ASan/UBSan clean) |
+| E24 | Phase 3 CPU (48 kHz) | fax ~1240×, SSTV ~2430×, time ~1050–1150×, AX.25 1200 Bd with 5 slicers ~107× real time |
+| E25 | APRS demo station through the radio (NFM, 1200 Bd), 40 s | all 7 packets, fully interpreted (Mic-E car 61 km/h 135°, weather 12.2 °C 270° 19 km/h 1014.2 hPa 78 %, message, status, object, walker, balloon 9,510 m) |
+| E26 | Time demo stations through the radio | CHU 7850 kHz: ticks, minute, full code "2026-11-25 13:02:37 UTC"; WWV 10 MHz: ticks, minute, 49 bits, full code "13:03:00 UTC" |
+| E27 | Picture demo stations through the radio | fax 7880 kHz: a chart, then phasing of the next; SSTV 14.230 MHz Martin M1: picture 1 complete, picture 2 started |
+| E28 | Time-stamping | before: the demo's time stations read the PC clock +0.13–0.15 s off (should be ~0). After stamping blocks on arrival and locking the demo stations to the clock: CHU +0.005 and +0.010 s over two minutes, WWV +0.005 s (full codes); the decoder alone, fed the encoders' audio with exact stamps at fractions 0/0.37/0.73: +0.000 s |
+| E29 | Pictures saved headless from the demo band | `offgrid-SSTV-…-1.png` 320×256 (colour test card, no slant), `offgrid-FAX-…-1.png` 1809×198 (chart, straight); viewed |
+| E30 | Live APRS on the stick, 144.800 MHz NFM | automatic gain: OVERLOAD at −30 dBFS, 0 frames in 3 min; fixed 28 dB: no overload, channel at the noise floor (−50 dBFS) all 5 min, 0 frames — nothing received (antenna / local traffic), so not a decoder result (P19) |
 | E14 | Graphicx `make test` | 62 picture checks + 124 interface checks, 0 failures; `example-dashboard` driven in a pty (keys, mouse, theme change, menu, quit) |
 
 ## 11. Open problems
@@ -372,6 +415,11 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | P10 | ~~No settings file~~ | Fixed in phase 2 (D13). |
 | P13 | ~~RTTY re-locked at 75 Bd after a gap of AGC-amplified noise~~ (the JS kept measuring pulse lengths on noise). Fixed: the pair counts only while the two tone filters hold ≥ 25 % of the power; history cleared when it goes; speed changes need two agreeing measurements; characters read from the start of an over on the known tones; start bits need 0.8 bit of mark before; tone moves smoothed. | Fixed 2026-11-25 (E15, E17). |
 | P14 | CW and RTTY lose the first characters after a pause (speed learning), as the JS does. | By design for now; a look-back re-decode is possible. |
+| P19 | No live APRS frame yet: none heard in 5 min on 144.800 MHz with the stick's antenna; automatic gain overloads there. | Outdoor VHF antenna; fixed gain (`-g 28`). |
+| P20 | The time decoder's first "second ticks found" estimate through the radio can be off by up to ~0.4 s (AGC settling), and once WWV's minute marker came out 21 s off; the full time codes were right (E28). T only accepts a full code. | Hold the tick report until the tick profile is steady. |
+| P16 | AX25Toolkit has no LICENSE file; its code is used with its author's permission (D15). | Add a license to AX25Toolkit (GPL-2.0-or-later or compatible). |
+| P17 | AX.25 9600 Bd needs flat discriminator audio at ≥ 38.4 kHz; the receiver's NFM audio is de-emphasised and 3 kHz wide. | A flat FM tap in the Receiver. |
+| P18 | Time decoding was not tried on real HF signals (the stick has no HF input). | Test with direct sampling or an upconverter. |
 | P15 | Calibration needs ≥ 10 dB SNR and several seconds; FM stations can be a few tens of Hz off (0.3 ppm at 100 MHz). | Average two stations; a time signal (WWV 10 MHz) needs HF. |
 
 ## 12. Plan: the next phases
@@ -379,8 +427,8 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | Phase | Content |
 |---|---|
 | 2 | **Built (2026-11-25):** text decoders on the audio: CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber; memories, logbook, labels, settings file; scan; frequency calibration; the code split into reusable libraries |
-| 3 | Pictures: weather fax, SSTV (shown with Graphicx `ImageView` / braille); time signals (CHU, WWV, RWM) and the clock |
-| 4 | Data: ACARS, VDL2, APRS, AIS, FT8/FT4/WSPR (with the "Heard" list and band survey) |
+| 3 | **Built (2026-11-25):** weather fax, SSTV, time signals (CHU, WWV, RWM) and the clock; AX.25/APRS (from phase 4); full mouse use |
+| 4 | Data: ACARS, VDL2, AIS, FT8/FT4/WSPR (with the "Heard" list and band survey) |
 | 5 | Digital broadcast: DAB/DAB+ and DRM (AAC/xHE-AAC in C++11), AUTO mode, Signal Monitor, waterfall replay, SDRconnect |
 
 ## 13. Glossary

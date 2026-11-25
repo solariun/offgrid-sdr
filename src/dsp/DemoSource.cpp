@@ -47,6 +47,7 @@
 #include "Rds.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace dsp {
@@ -89,6 +90,24 @@ struct Tone : Audio {
     float next() {
         const float v = amp * tableSin(tab, ph);
         ph += inc;
+        return v;
+    }
+};
+
+// A recorded programme, looped, resampled (linear) from its rate to the
+// station's audio rate (for NFM audio stations, e.g. APRS packets).
+struct LoopAudio : Audio {
+    std::vector<float> buf;
+    double pos, step;
+    LoopAudio(const std::vector<float>& b, double srcRate, double outRate, double startPos = 0)
+        : buf(b.empty() ? std::vector<float>(1, 0.0f) : b), pos(std::fmod(std::max(0.0, startPos), static_cast<double>(b.empty() ? 1 : b.size()))),
+          step(srcRate / outRate) {}
+    float next() {
+        const std::size_t i0 = static_cast<std::size_t>(pos);
+        const double f = pos - i0;
+        const float v = static_cast<float>(buf[i0 % buf.size()] * (1 - f) + buf[(i0 + 1) % buf.size()] * f);
+        pos += step;
+        if (pos >= buf.size()) pos -= buf.size();
         return v;
     }
 };
@@ -278,9 +297,10 @@ struct AudioUsbEnvelope : Envelope {
     std::vector<float> taps;    // Hilbert transformer
     std::vector<float> hist;    // last 127 input samples (ring)
     std::size_t at;
-    AudioUsbEnvelope(const std::vector<float>& a, double audioRate, double envRate)
-        : audio(a), pos(0), step(audioRate / envRate), taps(127), hist(127, 0.0f), at(0) {
+    AudioUsbEnvelope(const std::vector<float>& a, double audioRate, double envRate, double startPos = 0)
+        : audio(a), pos(startPos), step(audioRate / envRate), taps(127), hist(127, 0.0f), at(0) {
         if (audio.empty()) audio.assign(1, 0.0f);
+        pos = std::fmod(std::max(0.0, pos), static_cast<double>(audio.size()));
         for (int k = 0; k < 127; ++k) {
             const int m = 63 - k;  // tap k multiplies x[n - (126 - k)]: lag 126 - k, centred on 63
             const double w = 0.42 - 0.5 * std::cos(2 * kPi * k / 126.0) + 0.08 * std::cos(4 * kPi * k / 126.0);
@@ -453,6 +473,7 @@ struct DemoSource::Impl {
         double audioRate, levelDb;
         Mode mode;
         std::string name;
+        double wallStart;  // 0, or the Unix time of audio[0] (clock-locked)
     };
     std::vector<Extra> extras;  // added with addAudioStation(); placed by build()
 
@@ -557,8 +578,17 @@ struct DemoSource::Impl {
         for (std::size_t k = 0; k < extras.size(); ++k) {
             const Extra& x = extras[k];
             if (std::fabs(x.hz - center) > half) continue;
-            gens.push_back(new EnvelopeStation(fs, x.hz - center, dbToLin(x.levelDb), dAud,
-                                               new AudioUsbEnvelope(x.audio, x.audioRate, fs / dAud)));
+            // Clock-locked stations start at the sample for "now".
+            double startPos = 0;
+            if (x.wallStart > 0)
+                startPos = (std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() - x.wallStart) *
+                           x.audioRate;
+            if (x.mode == Mode::NFM)  // the audio frequency-modulates the carrier (5 kHz per unit)
+                gens.push_back(new FmStation(fs, x.hz - center, dbToLin(x.levelDb), dAud, 5000.0, 0,
+                                             new LoopAudio(x.audio, x.audioRate, fs / dAud, startPos)));
+            else
+                gens.push_back(new EnvelopeStation(fs, x.hz - center, dbToLin(x.levelDb), dAud,
+                                                   new AudioUsbEnvelope(x.audio, x.audioRate, fs / dAud, startPos)));
             DemoStation st;
             st.offsetHz = x.hz - center;
             st.mode = x.mode;
@@ -602,7 +632,7 @@ void DemoSource::setCenter(double centerHz) {
 const std::vector<DemoStation>& DemoSource::stations() const { return impl_->list; }
 
 void DemoSource::addAudioStation(double hz, const std::vector<float>& audio, double audioRate, double levelDb, Mode mode,
-                                 const std::string& name) {
+                                 const std::string& name, double wallClockStart) {
     Impl::Extra x;
     x.hz = hz;
     x.audio = audio;
@@ -610,6 +640,7 @@ void DemoSource::addAudioStation(double hz, const std::vector<float>& audio, dou
     x.levelDb = levelDb;
     x.mode = mode;
     x.name = name;
+    x.wallStart = wallClockStart;
     impl_->extras.push_back(x);
     impl_->build();
 }

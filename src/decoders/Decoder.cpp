@@ -20,17 +20,21 @@
 
 #include <cctype>
 
+#include "Ax25.h"
 #include "Cw.h"
+#include "Fax.h"
 #include "Hell.h"
 #include "Navtex.h"
 #include "Psk.h"
 #include "Rtty.h"
+#include "Sstv.h"
+#include "Time.h"
 
 namespace dec {
 
 namespace {
-const char* const kNames[] = {"CW", "RTTY", "PSK", "NAVTEX", "DSC", "HELL"};
-const int kCount = 6;
+const char* const kNames[] = {"CW", "RTTY", "PSK", "NAVTEX", "DSC", "HELL", "FAX", "SSTV", "TIME", "AX25"};
+const int kCount = 10;
 }  // namespace
 
 const char* kindName(Kind kind) {
@@ -43,6 +47,8 @@ bool parseKind(const std::string& name, Kind& kind) {
     for (size_t i = 0; i < name.size(); ++i) up += static_cast<char>(std::toupper(static_cast<unsigned char>(name[i])));
     if (up == "HELLSCHREIBER" || up == "FELDHELL") up = "HELL";
     if (up == "PSK31" || up == "PSK63" || up == "PSK125") up = "PSK";
+    if (up == "AX.25" || up == "APRS" || up == "PACKET") up = "AX25";
+    if (up == "WEFAX" || up == "RADIOFAX") up = "FAX";
     for (int i = 0; i < kCount; ++i) {
         if (up == kNames[i]) {
             kind = static_cast<Kind>(i);
@@ -66,6 +72,10 @@ std::unique_ptr<Decoder> makeDecoder(Kind kind) {
         case Kind::Navtex: return std::unique_ptr<Decoder>(new NavtexDecoder());
         case Kind::Dsc: return std::unique_ptr<Decoder>(new DscDecoder());
         case Kind::Hell: return std::unique_ptr<Decoder>(new HellDecoder());
+        case Kind::Fax: return std::unique_ptr<Decoder>(new FaxDecoder());
+        case Kind::Sstv: return std::unique_ptr<Decoder>(new SstvDecoder());
+        case Kind::Ax25: return std::unique_ptr<Decoder>(new Ax25Decoder());
+        case Kind::Time: return std::unique_ptr<Decoder>(new TimeDecoder());
     }
     return std::unique_ptr<Decoder>();
 }

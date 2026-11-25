@@ -17,7 +17,7 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
  NESDR SMArt v5 (R820T)  2.048 MS/s  DSP 5%  audio CoreAudio 80 ms        F1 help  q quit
 ```
 
-## What it does (phases 1 and 2)
+## What it does (phases 1, 2 and 3)
 
 | | |
 |---|---|
@@ -26,6 +26,10 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
 | **Display** | big frequency, mode buttons, status lights (stereo, RDS, squelch, overload, recording, mute), S-meter with peak hold and level history, spectrum (braille plot with the passband shaded), waterfall (half blocks, 9 colormaps), band list, controls, RDS line, status line |
 | **Controls** | tuning by step / typed frequency / mouse click, step sizes 1 Hz to 1 MHz, 41 bands, volume, mute, squelch, RF gain or auto, filter width, zoom x1-x32, waterfall floor and range (auto floor), stereo/mono, bias-tee, direct sampling, ppm correction |
 | **Decoders** | CW (speed learned), RTTY (shift, speed and polarity found), PSK31/63/125 (speed picked, AFC), NAVTEX (whole messages), DSC (ships' calls), Hellschreiber (picture); in a panel under the waterfall, or printed with `--headless` |
+| **Pictures** | weather fax (60–240 LPM, automatic slant) and SSTV (Martin M1/M2, Scottie S1/S2, PD90, PD120) drawn in the panel as they arrive and saved as PNG (`offgrid-FAX-…png`, `offgrid-SSTV-…png`) when each one ends |
+| **Time and clock** | CHU, WWV/WWVH and RWM: the time and the computer clock's error (±2.5 ms); **T** (or *Set clock*) corrects the clock shown in the header (marked •), kept with its learned drift in `clock.txt` |
+| **AX.25 / APRS** | packet radio at 1200 Bd (VHF, e.g. APRS 144.800 / 144.390 MHz in NFM), 300 Bd (HF) and 9600 Bd: every frame with its path, and APRS positions (also Mic-E and compressed), weather, messages, status, objects, items and telemetry in plain words; built on [AX25Toolkit](https://github.com/solariun/AX25Toolkit) |
+| **Mouse** | everything: a toolbar under the header for every action (Decoder ▾, Memory +, Label, Log, Scan, Scan mem, Calibrate, Record, Save picture, Set clock, Theme, Help, Quit), OK / Cancel in prompts, the tabs, lists, sliders and check boxes; click the frequency to type one, the wheel over it tunes; click on the spectrum or waterfall to tune; click the decoder panel's title to change decoder |
 | **Memories, labels, log** | named memories (frequency, mode, filter); your own labels drawn on the spectrum; a logbook (`logbook.csv`: UTC time, frequency, mode, level, SNR, station, notes) |
 | **Scan** | the current band in its channel steps, or the memories; stops on a signal, goes on 2 s after it ends |
 | **Calibration** | K on a station of known frequency (FM broadcast, a time signal): the stick's error in ppm is measured and corrected |
@@ -33,8 +37,7 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
 | **Recording** | the sound to a 16-bit stereo WAV (R key or `--wav`) |
 | **Themes** | amber (the browser version's default), orange, lime, green, cyan, vfd, blue, violet, rose, mono, light |
 
-Not yet ported (next phases): weather fax, SSTV and time signals (phase 3); ACARS,
-VDL2, APRS, AIS, FT8/FT4/WSPR (phase 4); DAB/DAB+, DRM, AUTO mode, the waterfall
+Not yet ported (next phases): ACARS, VDL2, AIS, FT8/FT4/WSPR (phase 4); DAB/DAB+, DRM, AUTO mode, the waterfall
 replay, the Signal Monitor and SDRconnect (phase 5).
 
 ### Decoders
@@ -48,7 +51,13 @@ expects the signal. **D** switches the decoder off.
 
 Try them with no hardware: `bin/offgrid --demo -f 7.355M --decoder rtty` (also
 7.312M RTTY, 7.275M CW, 14.071M PSK31, 7.0425M PSK63, 518k NAVTEX, 8414.5k DSC,
-14.0635M Hell).
+14.0635M Hell, 7.880M fax, 14.230M SSTV, 7.850M CHU and 10M WWV time signals,
+144.800M APRS).
+
+Each decoder sets the radio the way the browser version does (`src/app/DecoderPlan.h`):
+FAX USB 1.9 kHz below; SSTV on the frequency in USB (LSB below 10 MHz, NFM above
+30 MHz); TIME USB 1 kHz below, the station picked from the frequency; AX.25 in NFM
+at 1200 Bd above 30 MHz, in USB at 300 Bd below.
 
 ### Files
 
@@ -56,6 +65,8 @@ Try them with no hardware: `bin/offgrid --demo -f 7.355M --decoder rtty` (also
 |---|---|
 | `~/.config/offgrid/settings.ini` | the last frequency, mode, volume, theme, ppm …, the memories, the labels, each band's last frequency (plain text; written on exit) |
 | `~/.config/offgrid/logbook.csv` | the log, one line per entry, for any spreadsheet |
+| `~/.config/offgrid/clock.txt` | the clock correction, its source and history (the PC clock's drift) |
+| `offgrid-FAX-…png`, `offgrid-SSTV-…png`, `offgrid-…wav` | pictures and recordings, in the directory offgrid was started from |
 
 `$XDG_CONFIG_HOME` moves them, and `OFFGRID_CONFIG=dir` overrides the directory.
 
@@ -136,6 +147,7 @@ bin/offgrid --headless 10 -f 94.0    # no interface: one status line per second
 | L | log what you hear (with your notes) |
 | n / N | scan this band / the memories (Esc or any tuning key stops) |
 | K | calibrate on a station of known frequency |
+| T | set the clock from the time decoder's last full time code |
 | F1, h, ? | help |
 | q | quit |
 
@@ -160,7 +172,7 @@ PREFIX=…` installs them with their headers, and each directory has a README:
 |---|---|
 | [`liboffgrid-rtlsdr`](src/rtlsdr/README.md) | the RTL-SDR driver (no libusb) |
 | [`liboffgrid-dsp`](src/dsp/README.md) | demodulators, RDS, spectrum, demo band |
-| [`liboffgrid-decoders`](src/decoders/README.md) | CW, RTTY, PSK, NAVTEX, DSC, Hell, and their signal generators |
+| [`liboffgrid-decoders`](src/decoders/README.md) | CW, RTTY, PSK, NAVTEX, DSC, Hell, weather fax, SSTV, time signals (+ clock correction), AX.25/APRS, and their signal generators |
 | [`liboffgrid-audio`](src/audio/README.md) | sound output (no sound libraries) |
 
 `make examples` builds two small programs that use them: `example-fm-radio` (an FM
@@ -173,13 +185,14 @@ WAV file with any decoder).
 src/usb/      USB without libusb: UsbLinux.cpp (usbfs ioctls), UsbMac.cpp (IOKit)
 src/rtlsdr/   the RTL-SDR driver: Rtl2832u (demodulator chip), R82xx (tuners), RtlSdr (public class)
 src/dsp/      signal processing: FFT, filters, demodulators, RDS, spectrum, demo band
-src/decoders/ text and picture decoders: Cw, Rtty, Psk, Navtex (+DSC), Hell; encoders for tests and the demo
+src/decoders/ decoders: Cw, Rtty, Psk, Navtex (+DSC), Hell, Fax, Sstv, Time (+Clock), Ax25 (+APRS;
+              ax25/ = AX25Toolkit's modem, HDLC, frames); encoders for tests and the demo
 src/audio/    sound out: AudioMac.cpp (AudioQueue), AudioLinux.cpp (ALSA ioctls / pipe)
 src/app/      the program: Source (stick, rtl_tcp, file, demo), Radio (engine), Ui, Store (settings, memories,
               labels, log), Bands, Options, main
 tools/        rtl-probe
 examples/     fm-radio.cpp, decode.cpp (the libraries on their own)
-tests/        test_dsp.cpp, test_decoders_fsk.cpp, test_decoders_psk.cpp
+tests/        test_dsp.cpp, test_decoders_{fsk,psk,picture,time,ax25}.cpp
 external/Graphicx   the terminal graphics and widget library (git submodule)
 spec.md       the specification: requirements, design, decisions, evidence, open problems
 ```

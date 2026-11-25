@@ -39,9 +39,12 @@ namespace app {
 class SampleQueue {
 public:
     explicit SampleQueue(std::size_t maxBlocks = 64);
+    // Each block is stamped with the computer's clock (Unix seconds) when
+    // it arrived: the time of its last sample, for the time decoders.
     void push(const std::uint8_t* data, std::size_t length);
-    // Waits up to timeoutMs for a block; false on timeout.
-    bool pop(std::vector<std::uint8_t>& block, int timeoutMs);
+    // Waits up to timeoutMs for a block; false on timeout.  arrived (if
+    // given) receives the block's arrival time.
+    bool pop(std::vector<std::uint8_t>& block, int timeoutMs, double* arrived = 0);
     void clear();
     unsigned dropped() const { return dropped_; }
     std::size_t size() const;
@@ -50,6 +53,7 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable ready_;
     std::deque<std::vector<std::uint8_t> > blocks_;
+    std::deque<double> times_;  // arrival time of each block
     std::vector<std::vector<std::uint8_t> > spare_;  // recycled buffers
     std::size_t maxBlocks_;
     std::atomic<unsigned> dropped_;

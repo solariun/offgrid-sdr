@@ -23,10 +23,14 @@
 
 #include <signal.h>
 
+#include <ctime>
+#include <graphicx/png.h>
+
 #include "../rtlsdr/RtlSdr.h"
 #include "Bands.h"
 #include "Options.h"
 #include "Radio.h"
+#include "DecoderPlan.h"
 #include "Store.h"
 #include "Ui.h"
 
@@ -49,7 +53,46 @@ int listSticks() {
     return 0;
 }
 
+// Headless pictures (FAX, SSTV): kept row by row and saved as PNG when the
+// next picture starts and at the end (unattended fax archiving).
+struct PictureSaver {
+    unsigned id;
+    int width;
+    std::vector<std::vector<unsigned char> > rows;
+    PictureSaver() : id(~0u), width(0) {}
+    void save(const std::string& kind) {
+        if (rows.empty() || width <= 0) return;
+        gfx::Image img(width, static_cast<int>(rows.size()));
+        for (size_t y = 0; y < rows.size(); ++y)
+            for (int x = 0; x < width; ++x)
+                img.set(x, static_cast<int>(y), gfx::rgb(rows[y][x * 3], rows[y][x * 3 + 1], rows[y][x * 3 + 2]));
+        std::time_t now = std::time(0);
+        char name[64];
+        std::strftime(name, sizeof(name), "%Y%m%d-%H%M%S", std::localtime(&now));
+        std::string path = "offgrid-" + kind + "-" + name + "-" + std::to_string(id) + ".png", error;
+        if (gfx::savePng(path, img, error)) std::printf("picture saved: %s (%dx%d)\n", path.c_str(), width, static_cast<int>(rows.size()));
+        else std::printf("picture not saved: %s\n", error.c_str());
+        rows.clear();
+    }
+    void add(const std::vector<dec::PictureLine>& lines, const std::string& kind) {
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const dec::PictureLine& l = lines[i];
+            if (l.picture != id) {
+                save(kind);
+                id = l.picture;
+                width = static_cast<int>(l.rgb.size() / 3);
+            }
+            if (l.row < 0 || width <= 0) continue;
+            if (static_cast<size_t>(l.row) >= rows.size())
+                rows.resize(static_cast<size_t>(l.row) + 1, std::vector<unsigned char>(static_cast<size_t>(width) * 3, 0));
+            rows[static_cast<size_t>(l.row)] = l.rgb;
+            rows[static_cast<size_t>(l.row)].resize(static_cast<size_t>(width) * 3, 0);
+        }
+    }
+};
+
 int headless(app::Radio& radio, const app::Options& o) {
+    PictureSaver pictures;
     signal(SIGINT, onSignal);
     signal(SIGTERM, onSignal);
     app::RadioSettings s = radio.settings();
@@ -102,10 +145,16 @@ int headless(app::Radio& radio, const app::Options& o) {
             std::string text;
             radio.takeDecoderText(text);
             if (!text.empty()) std::printf("decoded: %s\n", text.c_str());
+            std::vector<dec::PictureLine> lines;
+            radio.takeDecoderLines(lines);
+            if (!lines.empty()) pictures.add(lines, dec::kindName(snap.decoderKind));
             std::fflush(stdout);
         }
         if (elapsed >= o.headlessSeconds) break;
     }
+    app::Snapshot last;
+    radio.snapshot(last);
+    pictures.save(dec::kindName(last.decoderKind));  // the picture in progress
     return 0;
 }
 
@@ -171,15 +220,12 @@ int main(int argc, char** argv) {
     if (!o.wav.empty() && !radio.startRecording(o.wav, error)) std::fprintf(stderr, "offgrid: %s\n", error.c_str());
     dec::Kind kind;
     if (o.headlessSeconds > 0 && !o.decoder.empty() && dec::parseKind(o.decoder, kind)) {
-        // As in the interface: CW in CW mode, the others in USB with the dial
-        // on the signal's frequency.
-        if (kind == dec::Kind::Cw) radio.setMode(dsp::Mode::CW);
-        else {
-            radio.setMode(dsp::Mode::USB);
-            radio.setBandwidth(3000);
-            radio.setDecoderShift(dec::makeDecoder(kind)->audioCenterHz());
-        }
-        radio.setDecoder(true, kind);
+        // As in the interface (DecoderPlan.h).
+        app::DecoderPlan plan = app::planDecoder(kind, radio.settings().frequency);
+        radio.setMode(plan.mode);
+        if (plan.bandwidth > 0) radio.setBandwidth(plan.bandwidth);
+        radio.setDecoderShift(plan.shift);
+        radio.setDecoder(true, kind, plan.setup);
     }
 
     int code = 0;

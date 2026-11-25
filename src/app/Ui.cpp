@@ -48,10 +48,17 @@
 #include <ctime>
 
 #include <graphicx/canvas.h>
+#include <graphicx/png.h>
 #include <graphicx/terminal.h>
 #include <graphicx/widgets.h>
 
+#include <fstream>
+#include <sstream>
+#include <sys/time.h>
+
+#include "../decoders/Clock.h"
 #include "Bands.h"
+#include "DecoderPlan.h"
 
 namespace app {
 
@@ -100,21 +107,38 @@ void bandwidthRange(dsp::Mode m, double& lo, double& hi, double& step) {
 // log notes).  The caller sets title / label / onSubmit, then opens it.
 class Prompt : public Widget {
 public:
-    Prompt() {
+    Prompt() : okX(0), cancelX(0) {
         input.maxLength = 60;
     }
     std::string title, hint, error;
     TextInput input;
+    int okX, cancelX;  // where the buttons were drawn (local columns, row 4)
     bool focusable() const { return true; }
     void draw(Painter& p, const Theme& t, bool) {
         p.panel(p.bounds(), t.focus, t.panel, Border::Double, " " + title + " ");
         Painter in = p.sub(rect(2, 2, p.width() - 4, 1));
         input.draw(in, t, true);
-        if (!error.empty()) p.text(2, 3, error, t.bad);
-        else p.text(2, 3, hint.empty() ? std::string("Enter accepts, Esc cancels") : hint, t.dim);
+        if (!error.empty()) p.text(rect(2, 3, p.width() - 4, 1), error, t.bad, Align::Left);
+        else p.text(rect(2, 3, p.width() - 4, 1), hint.empty() ? std::string("Enter accepts, Esc cancels") : hint, t.dim, Align::Left);
+        // Clickable buttons (mouse users).
+        cancelX = p.width() - 2 - 10;
+        okX = cancelX - 1 - 6;
+        p.text(okX, 4, "[ OK ]", t.accentText, t.accent, Bold);
+        p.text(cancelX, 4, "[ Cancel ]", t.text, lerp(t.panel, t.text, 0.12));
     }
     bool handle(const Event& e) {
-        if (e.type == terminal::EventType::Mouse) return true;
+        if (e.type == terminal::EventType::Mouse) {
+            if (e.button == terminal::MouseButton::Left && e.action == terminal::MouseAction::Release && e.y == 4) {
+                if (e.x >= okX && e.x < okX + 6 && input.onSubmit) input.onSubmit(input.text);
+                else if (e.x >= cancelX && e.x < cancelX + 10 && input.onCancel) input.onCancel();
+            } else if (e.y == 2) {
+                Event local = e;
+                local.x -= 2;
+                local.y = 0;
+                input.handle(local);  // place the cursor
+            }
+            return true;
+        }
         return input.handle(e);
     }
 };
@@ -122,11 +146,50 @@ public:
 // The decoder's output: scrolling text, or the Hellschreiber picture.
 class DecoderView : public Widget {
 public:
-    DecoderView() : picture(false) {}
+    DecoderView() : picture(false), lineMode(false), pictureId(~0u), pictureWidth(0) {}
     std::string title;
     std::string text;                              // everything decoded (last 16 kB)
     std::vector<std::vector<float> > columns;      // Hell columns (last 2000)
-    bool picture;
+    bool picture;                                  // Hell strip
+    bool lineMode;                                 // FAX / SSTV picture
+    // FAX / SSTV: the picture being received, row by row (RGB bytes).
+    unsigned pictureId;
+    int pictureWidth;
+    std::vector<std::vector<unsigned char> > rows;
+    std::function<void()> onTitleClick;
+    // Called with the finished picture before a new one starts.
+    std::function<void(const Image&)> onPictureDone;
+
+    Image pictureImage() const {
+        Image img(pictureWidth, static_cast<int>(rows.size()), rgb(0, 0, 0));
+        for (size_t y = 0; y < rows.size(); ++y)
+            for (int x = 0; x < pictureWidth && static_cast<size_t>(x) * 3 + 2 < rows[y].size(); ++x)
+                img.set(x, static_cast<int>(y), rgb(rows[y][x * 3], rows[y][x * 3 + 1], rows[y][x * 3 + 2]));
+        return img;
+    }
+    void addLines(const std::vector<dec::PictureLine>& lines) {
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const dec::PictureLine& l = lines[i];
+            if (l.picture != pictureId) {
+                if (!rows.empty() && onPictureDone) onPictureDone(pictureImage());
+                rows.clear();
+                pictureId = l.picture;
+                pictureWidth = static_cast<int>(l.rgb.size() / 3);
+            }
+            if (l.row < 0 || pictureWidth <= 0) continue;
+            if (static_cast<size_t>(l.row) >= rows.size()) rows.resize(static_cast<size_t>(l.row) + 1, std::vector<unsigned char>(static_cast<size_t>(pictureWidth) * 3, 0));
+            rows[static_cast<size_t>(l.row)] = l.rgb;
+            rows[static_cast<size_t>(l.row)].resize(static_cast<size_t>(pictureWidth) * 3, 0);
+        }
+    }
+    bool handle(const Event& e) {
+        if (e.type == terminal::EventType::Mouse && e.y == 0 && e.button == terminal::MouseButton::Left &&
+            e.action == terminal::MouseAction::Press && onTitleClick) {
+            onTitleClick();
+            return true;
+        }
+        return false;
+    }
     void addText(const std::string& s) {
         text += s;
         if (text.size() > 16384) text.erase(0, text.size() - 16384);
@@ -138,6 +201,9 @@ public:
     void clear() {
         text.clear();
         columns.clear();
+        rows.clear();
+        pictureId = ~0u;
+        pictureWidth = 0;
     }
     void draw(Painter& p, const Theme& t, bool focused) {
         p.panel(p.bounds(), focused ? t.focus : t.border, t.panel, Border::Rounded, std::string());
@@ -146,6 +212,34 @@ public:
         in.x += 1;
         in.width -= 2;
         if (in.empty()) return;
+        if (lineMode) {
+            // FAX / SSTV: the newest part of the picture that fits, at the
+            // picture's own aspect ratio (half blocks: 1x2 pixels a cell).
+            if (rows.empty() || pictureWidth <= 0) {
+                p.text(in.x, in.y, "waiting for a picture...", t.dim);
+                return;
+            }
+            int cols = in.width, pixRows = in.height * 2;
+            double scale = static_cast<double>(cols) / pictureWidth;  // cells per pixel
+            int show = std::min(static_cast<int>(rows.size()), std::max(1, static_cast<int>(pixRows / scale)));
+            int w = cols;
+            int h = std::max(1, std::min(in.height, static_cast<int>(show * scale / 2 + 0.5)));
+            if (h * 2 > pixRows) h = in.height;
+            Image img(pictureWidth, show, rgb(0, 0, 0));
+            for (int y = 0; y < show; ++y) {
+                const std::vector<unsigned char>& r = rows[rows.size() - show + y];
+                for (int x = 0; x < pictureWidth; ++x) img.set(x, y, rgb(r[x * 3], r[x * 3 + 1], r[x * 3 + 2]));
+            }
+            // Narrow pictures (SSTV) keep their shape, centred.
+            if (show * scale / 2 < in.height) {
+                double fit = std::min(static_cast<double>(in.width) / pictureWidth, in.height * 2.0 / show);
+                w = std::max(1, static_cast<int>(pictureWidth * fit));
+                h = std::max(1, static_cast<int>(show * fit / 2));
+            }
+            Painter area = p.sub(rect(in.x + (in.width - w) / 2, in.y, w, h));
+            area.image(area.bounds(), img, PixelMode::HalfBlocks, Filter::Box);
+            return;
+        }
         if (picture) {
             // Hell: 14 dots a column, newest at the right; one pixel per dot,
             // half blocks (2 dots a cell row), stretched to the panel height.
@@ -234,6 +328,8 @@ struct Ui::Impl {
     unsigned wfPhase;
     std::vector<LogEntry> logCache;
     std::unique_ptr<dec::Decoder> probe;  // asked for the decoder's audio centre (tuning marker)
+    // toolbar (mouse access to everything the keys do)
+    std::vector<std::unique_ptr<Button> > toolbar;
     // scan
     enum ScanKind { ScanOff, ScanBand, ScanMemories } scanKind;
     double scanLow, scanHigh, scanStep;
@@ -241,6 +337,9 @@ struct Ui::Impl {
     int scanDwell;             // frames left on this channel before judging
     int scanHold;              // frames of silence left before moving on
     bool scanStopped;          // a signal holds the scan here
+    std::string notice;        // last action's result, shown in the status bar for a while
+    int noticeFrames;
+    dec::ClockCorrection clock;  // the corrected time (time signals), kept in clock.txt
 
     void build();
     void layout(const Rect& screen);
@@ -263,6 +362,24 @@ struct Ui::Impl {
     void scanStep_();
     void calibrate();
     void saveState();
+    // Actions shared by keys, toolbar and mouse.
+    void askFrequency();
+    void openDecoderMenu();
+    void saveMemory();
+    void labelHere();
+    void logHere();
+    void showHelp();
+    void savePicture(const Image& img, const std::string& kind);
+    void setClock();
+    static double pcNow() {
+        timeval tv;
+        gettimeofday(&tv, 0);
+        return tv.tv_sec + tv.tv_usec * 1e-6;
+    }
+    void say(const std::string& text) {
+        notice = text;
+        noticeFrames = 150;
+    }
     Rect screen() { return rect(0, 0, app.surface().width(), app.surface().height()); }
 };
 
@@ -307,7 +424,8 @@ Ui::Impl::Impl(Radio& r, const Options& o, Store& s)
       scanIndex(0),
       scanDwell(0),
       scanHold(0),
-      scanStopped(false) {
+      scanStopped(false),
+      noticeFrames(0) {
     themes = themeNames();
     for (size_t i = 0; i < themes.size(); ++i)
         if (themes[i] == o.theme) themeIndex = i;
@@ -401,7 +519,7 @@ void Ui::Impl::ask(const std::string& title, const std::string& label, const std
     prompt.input.accept = std::function<bool(std::uint32_t)>();
     prompt.input.setText(initial);
     promptAction = action;
-    prompt.bounds = centered(screen(), std::min(64, app.surface().width() - 2), 5);
+    prompt.bounds = centered(screen(), std::min(64, app.surface().width() - 2), 6);
     app.openPopup(prompt, true);
 }
 
@@ -423,25 +541,24 @@ void Ui::Impl::startDecoder(dec::Kind kind) {
     // Each decoder listens in the mode it needs; the dial stays where it is
     // (the spectrum marks where the signal should sit: dial + the decoder's
     // audio centre).
-    if (kind == dec::Kind::Cw) {
-        setMode(dsp::Mode::CW);
-        radio.setDecoderShift(0);
-    } else {
-        if (radio.settings().mode != dsp::Mode::USB) setMode(dsp::Mode::USB);
-        radio.setBandwidth(3000);
-        syncControls();
-        probe = dec::makeDecoder(kind);
-        radio.setDecoderShift(probe->audioCenterHz());  // the dial shows the signal's frequency
-    }
-    radio.setDecoder(true, kind);
+    DecoderPlan plan = planDecoder(kind, radio.settings().frequency);
+    if (radio.settings().mode != plan.mode) setMode(plan.mode);
+    if (plan.bandwidth > 0) radio.setBandwidth(plan.bandwidth);
+    radio.setDecoderShift(plan.shift);  // the dial shows the signal's frequency
+    syncControls();
+    radio.setDecoder(true, kind, plan.setup);
+    if (decoderView.lineMode && !decoderView.rows.empty()) savePicture(decoderView.pictureImage(), dec::kindName(snap.decoderKind));
     decoderView.clear();
     decoderView.picture = kind == dec::Kind::Hell;
+    decoderView.lineMode = kind == dec::Kind::Fax || kind == dec::Kind::Sstv;
     decoderView.visible = true;
     store.set("decoder", dec::kindName(kind));
     app.relayout();
 }
 
 void Ui::Impl::stopDecoder() {
+    if (decoderView.lineMode && !decoderView.rows.empty()) savePicture(decoderView.pictureImage(), dec::kindName(snap.decoderKind));
+    decoderView.lineMode = false;
     radio.setDecoder(false);
     radio.setDecoderShift(0);
     decoderView.visible = false;
@@ -522,6 +639,115 @@ void Ui::Impl::calibrate() {
     };
     confirm.place(screen(), 64);
     app.openPopup(confirm, true);
+}
+
+// ----------------------------------------------------------------- actions --
+
+void Ui::Impl::askFrequency() {
+    ask("Frequency", "MHz / kHz / Hz:", std::string(), [this](const std::string& text) {
+        double hz;
+        if (!parseFrequency(text, hz)) {
+            prompt.error = "not a frequency: " + text;
+            return;
+        }
+        stopScan();
+        const Band* band = bandAt(hz);
+        if (band && band->mode != radio.settings().mode && (band->name == "FM broadcast" || band->name == "Airband"))
+            setMode(band->mode);
+        tune(hz, false);
+    }, "e.g. 100.3  7074k  145.8M   Enter tunes, Esc cancels");
+    prompt.input.accept = [](std::uint32_t c) {
+        return (c >= '0' && c <= '9') || c == '.' || c == 'k' || c == 'K' || c == 'm' || c == 'M' || c == 'g' || c == 'G' ||
+               c == 'h' || c == 'H' || c == 'z' || c == 'Z' || c == ' ';
+    };
+}
+
+void Ui::Impl::openDecoderMenu() {
+    decoderMenu.place(2, 4, screen());
+    app.openPopup(decoderMenu);
+}
+
+void Ui::Impl::saveMemory() {
+    RadioSettings s = radio.settings();
+    std::string name = snap.rds.ps;
+    while (!name.empty() && name[name.size() - 1] == ' ') name.erase(name.size() - 1);
+    if (name.empty()) name = formatShort(s.frequency) + " " + dsp::modeName(s.mode);
+    ask("Save memory", "Name:", name, [this, s](const std::string& text) {
+        Memory m = {text.empty() ? formatShort(s.frequency) : text, s.frequency, s.mode, s.bandwidth};
+        store.addMemory(m);
+        listTabs.selected = 1;
+        fillList();
+        say("memory saved: " + m.name);
+    });
+}
+
+void Ui::Impl::labelHere() {
+    double hz = radio.settings().frequency;
+    std::string current;
+    for (size_t i = 0; i < store.labels.size(); ++i)
+        if (std::fabs(store.labels[i].hz - hz) <= 500) current = store.labels[i].text;
+    ask("Label " + formatShort(hz), "Text:", current, [this, hz](const std::string& text) {
+        if (text.empty()) store.removeLabelNear(hz, 500);
+        else store.addLabel(hz, text);
+    }, "shown on the spectrum; empty removes it");
+}
+
+void Ui::Impl::logHere() {
+    RadioSettings s = radio.settings();
+    Snapshot at = snap;
+    std::string station = at.rds.ps;
+    while (!station.empty() && station[station.size() - 1] == ' ') station.erase(station.size() - 1);
+    ask("Log " + formatShort(s.frequency), "Notes:", std::string(), [this, s, at, station](const std::string& text) {
+        LogEntry e;
+        e.utc = utcNow();
+        e.hz = s.frequency;
+        e.mode = at.decoderOn ? dec::kindName(at.decoderKind) : dsp::modeName(s.mode);
+        e.levelDb = at.channelDbfs;
+        e.snrDb = at.channelDbfs - at.noiseDbfs;
+        e.station = station;
+        e.notes = text;
+        std::string error;
+        if (!Store::appendLog(e, error)) prompt.error = error;
+        else {
+            if (listTabs.selected == 2) fillList();
+            say("logged " + formatShort(s.frequency));
+        }
+    }, "station " + (station.empty() ? std::string("-") : station) + "; written to " + Store::logPath());
+}
+
+// T / "Set clock": the decoded time code becomes the clock's correction.
+void Ui::Impl::setClock() {
+    const dec::Status& d = snap.decoder;
+    if (!snap.decoderOn || snap.decoderKind != dec::Kind::Time) {
+        showMessage("Set clock", "Start the time-signal decoder (d, Time signal) on CHU (3330/7850/14670 kHz), WWV/WWVH "
+                                 "(2.5/5/10/15/20 MHz) or RWM (4996/9996/14996 kHz), wait for a full minute's time code, then press T.");
+        return;
+    }
+    if (!d.timeValid) {
+        showMessage("Set clock", "No full time code yet (" + d.info + "). CHU and WWV send one every minute.");
+        return;
+    }
+    double pc = pcNow();
+    clock.set(-d.clockOffset, d.station + " " + formatShort(radio.settings().frequency), dec::ClockSetKind::Code, pc);
+    say("clock set from " + d.station + fmt(": the computer was %+.3f s off", -d.clockOffset));
+}
+
+void Ui::Impl::showHelp() {
+    help.place(screen(), std::min(90, app.surface().width() - 2));
+    help.bounds.height = std::min(app.surface().height() - 2, 21);
+    app.openPopup(help, true);
+}
+
+// Pictures are saved where the program was started, like WAV recordings.
+void Ui::Impl::savePicture(const Image& img, const std::string& kind) {
+    if (img.empty()) return;
+    std::time_t now = std::time(0);
+    char name[96];
+    std::strftime(name, sizeof(name), "%Y%m%d-%H%M%S.png", std::localtime(&now));
+    std::string path = "offgrid-" + kind + "-" + name;
+    std::string error;
+    if (savePng(path, img, error)) say("picture saved: " + path);
+    else say(error);
 }
 
 // ------------------------------------------------------------------- lists --
@@ -644,6 +870,49 @@ void Ui::Impl::build() {
         }
     };
     decoderView.visible = false;
+    decoderView.onTitleClick = [this]() { openDecoderMenu(); };
+    decoderView.onPictureDone = [this](const Image& img) {
+        savePicture(img, snap.decoderOn ? std::string(dec::kindName(snap.decoderKind)) : std::string("picture"));
+    };
+    // The toolbar: one click for each action that has a key.
+    struct Tool {
+        const char* label;
+        std::function<void()> action;
+    };
+    Tool tools[] = {
+        {"Decoder \xE2\x96\xBE", [this]() { openDecoderMenu(); }},
+        {"Memory +", [this]() { saveMemory(); }},
+        {"Label", [this]() { labelHere(); }},
+        {"Log", [this]() { logHere(); }},
+        {"Scan", [this]() {
+             if (scanKind != ScanOff) stopScan();
+             else startScan(ScanBand);
+         }},
+        {"Scan mem", [this]() {
+             if (scanKind != ScanOff) stopScan();
+             else startScan(ScanMemories);
+         }},
+        {"Calibrate", [this]() { calibrate(); }},
+        {"Record", [this]() { toggleRecording(); }},
+        {"Save picture", [this]() {
+             if (decoderView.lineMode) savePicture(decoderView.pictureImage(), dec::kindName(snap.decoderKind));
+             else say("no picture: start the FAX or SSTV decoder (d)");
+         }},
+        {"Set clock", [this]() { setClock(); }},
+        {"Theme", [this]() {
+             themeIndex = (themeIndex + 1) % themes.size();
+             app.setTheme(theme(themes[themeIndex]));
+             waterfall.clear();
+         }},
+        {"Help", [this]() { showHelp(); }},
+        {"Quit", [this]() { app.quit(); }},
+    };
+    for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); ++i) {
+        std::unique_ptr<Button> b(new Button(tools[i].label));
+        b->brackets = false;
+        b->onPress = tools[i].action;
+        toolbar.push_back(std::move(b));
+    }
 
     listTabs.tabs.push_back("Bands");
     listTabs.tabs.push_back("Memories");
@@ -726,8 +995,18 @@ void Ui::Impl::build() {
     decoderMenu.title = "Decoder";
     std::vector<dec::Kind> kinds = dec::allKinds();
     for (size_t i = 0; i < kinds.size(); ++i) {
-        const char* names[] = {"CW (Morse)", "RTTY", "PSK31 / 63 / 125", "NAVTEX", "DSC (ships' calls)", "Hellschreiber"};
-        decoderMenu.addItem(names[i], std::string(1, static_cast<char>('1' + i)));
+        std::string name = dec::kindName(kinds[i]);
+        switch (kinds[i]) {
+            case dec::Kind::Cw: name = "CW (Morse)"; break;
+            case dec::Kind::Psk: name = "PSK31 / 63 / 125"; break;
+            case dec::Kind::Dsc: name = "DSC (ships' calls)"; break;
+            case dec::Kind::Hell: name = "Hellschreiber"; break;
+            case dec::Kind::Fax: name = "Weather fax"; break;
+            case dec::Kind::Sstv: name = "SSTV (pictures)"; break;
+            case dec::Kind::Time: name = "Time signal (CHU/WWV/RWM)"; break;
+            default: break;
+        }
+        decoderMenu.addItem(name);
     }
     decoderMenu.addSeparator();
     decoderMenu.addItem("Off", "D");
@@ -748,6 +1027,7 @@ void Ui::Impl::build() {
         "M           save a memory here                   Del  delete the selected memory\n"
         "l           label this frequency (empty: remove) L  log what you hear\n"
         "n / N       scan this band / the memories        K  calibrate on a known station\n"
+        "T           set the clock from a time signal (time decoder)\n"
         "+ / -, space  volume, mute                       g / G, a  RF gain down / up, auto\n"
         "s / S       squelch down / up                    w / W  filter narrower / wider\n"
         "z / Z       zoom in / out                        [ ] { }  waterfall floor / range\n"
@@ -760,8 +1040,9 @@ void Ui::Impl::build() {
                      &rdsLabel, &listPanel, &listTabs, &list, &controlsPanel, &volume, &squelch, &gain, &autoGain,
                      &bandwidth, &zoom, &wfFloor, &wfRange, &stereo, &biasTee, &status};
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) app.add(*all[i]);
+    for (size_t i = 0; i < toolbar.size(); ++i) app.add(*toolbar[i]);
     app.onLayout = [this](const Rect& r) { layout(r); };
-    app.onDrawBackground = [this](Painter& p) { p.fill(rect(0, 0, p.width(), 4), lerp(app.theme().background, app.theme().panel, 0.8)); };
+    app.onDrawBackground = [this](Painter& p) { p.fill(rect(0, 0, p.width(), 5), lerp(app.theme().background, app.theme().panel, 0.8)); };
     syncControls();
     fillList();
     bindKeys();
@@ -793,9 +1074,16 @@ void Ui::Impl::layout(const Rect& r) {
     meter.bounds = rect(meterX, 0, w - meterX - 1, 2);
     levelHistory.bounds = rect(meterX + 2, 2, std::max(0, w - meterX - 16), 1);
     clockLabel.bounds = rect(w - 13, 2, 12, 1);
+    int tx = 1;  // toolbar on row 3
+    for (size_t i = 0; i < toolbar.size(); ++i) {
+        int bw = columns(toolbar[i]->label) + 2;
+        toolbar[i]->visible = tx + bw <= w;
+        toolbar[i]->bounds = rect(tx, 3, bw, 1);
+        tx += bw + 1;
+    }
     status.bounds = rect(0, h - 1, w, 1);
     rdsLabel.bounds = rect(1, h - 2, w - 2, 1);
-    Rect main = rect(0, 4, w - side - (side ? 1 : 0), h - 4 - 2);
+    Rect main = rect(0, 5, w - side - (side ? 1 : 0), h - 5 - 2);
     int decH = decoderView.visible ? std::max(5, main.height / 3) : 0;
     int rest = main.height - decH;
     int specH = std::max(4, rest * 2 / 5);
@@ -864,24 +1152,7 @@ void Ui::Impl::bindKeys() {
         stopScan();
         tune(radio.settings().frequency - 1e6, false);
     });
-    std::function<void()> askFrequency = [this]() {
-        ask("Frequency", "MHz / kHz / Hz:", std::string(), [this](const std::string& text) {
-            double hz;
-            if (!parseFrequency(text, hz)) {
-                prompt.error = "not a frequency: " + text;
-                return;
-            }
-            stopScan();
-            const Band* band = bandAt(hz);
-            if (band && band->mode != radio.settings().mode && (band->name == "FM broadcast" || band->name == "Airband"))
-                setMode(band->mode);
-            tune(hz, false);
-        }, "e.g. 100.3  7074k  145.8M   Enter tunes, Esc cancels");
-        prompt.input.accept = [](std::uint32_t c) {
-            return (c >= '0' && c <= '9') || c == '.' || c == 'k' || c == 'K' || c == 'm' || c == 'M' || c == 'g' || c == 'G' ||
-                   c == 'h' || c == 'H' || c == 'z' || c == 'Z' || c == ' ';
-        };
-    };
+    std::function<void()> askFrequency = [this]() { this->askFrequency(); };
     app.bindKey(KeyEnter, askFrequency);
     app.bindKey('f', askFrequency);
     for (int i = 0; i < kModeCount; ++i) {
@@ -933,58 +1204,17 @@ void Ui::Impl::bindKeys() {
         waterfall.clear();
     });
     app.bindKey('R', [this]() { toggleRecording(); });
-    app.bindKey('d', [this]() {
-        decoderMenu.place(2, 4, screen());
-        app.openPopup(decoderMenu);
-    });
+    app.bindKey('d', [this]() { openDecoderMenu(); });
     app.bindKey('D', [this]() { stopDecoder(); });
-    app.bindKey('M', [this]() {
-        RadioSettings s = radio.settings();
-        std::string name = snap.rds.ps;
-        while (!name.empty() && name[name.size() - 1] == ' ') name.erase(name.size() - 1);
-        if (name.empty()) name = formatShort(s.frequency) + " " + dsp::modeName(s.mode);
-        ask("Save memory", "Name:", name, [this, s](const std::string& text) {
-            Memory m = {text.empty() ? formatShort(s.frequency) : text, s.frequency, s.mode, s.bandwidth};
-            store.addMemory(m);
-            listTabs.selected = 1;
-            fillList();
-        });
-    });
+    app.bindKey('M', [this]() { saveMemory(); });
     app.bindKey(KeyDelete, [this]() {
         if (listTabs.selected == 1 && list.selected >= 0 && list.selected < static_cast<int>(store.memories.size())) {
             store.memories.erase(store.memories.begin() + list.selected);
             fillList();
         }
     });
-    app.bindKey('l', [this]() {
-        double hz = radio.settings().frequency;
-        std::string current;
-        for (size_t i = 0; i < store.labels.size(); ++i)
-            if (std::fabs(store.labels[i].hz - hz) <= 500) current = store.labels[i].text;
-        ask("Label " + formatShort(hz), "Text:", current, [this, hz](const std::string& text) {
-            if (text.empty()) store.removeLabelNear(hz, 500);
-            else store.addLabel(hz, text);
-        }, "shown on the spectrum; empty removes it");
-    });
-    app.bindKey('L', [this]() {
-        RadioSettings s = radio.settings();
-        Snapshot at = snap;
-        std::string station = at.rds.ps;
-        while (!station.empty() && station[station.size() - 1] == ' ') station.erase(station.size() - 1);
-        ask("Log " + formatShort(s.frequency), "Notes:", std::string(), [this, s, at, station](const std::string& text) {
-            LogEntry e;
-            e.utc = utcNow();
-            e.hz = s.frequency;
-            e.mode = at.decoderOn ? dec::kindName(at.decoderKind) : dsp::modeName(s.mode);
-            e.levelDb = at.channelDbfs;
-            e.snrDb = at.channelDbfs - at.noiseDbfs;
-            e.station = station;
-            e.notes = text;
-            std::string error;
-            if (!Store::appendLog(e, error)) prompt.error = error;
-            else if (listTabs.selected == 2) fillList();
-        }, "station " + (station.empty() ? std::string("-") : station) + "; written to " + Store::logPath());
-    });
+    app.bindKey('l', [this]() { labelHere(); });
+    app.bindKey('L', [this]() { logHere(); });
     app.bindKey('n', [this]() {
         if (scanKind == ScanBand) stopScan();
         else startScan(ScanBand);
@@ -994,17 +1224,21 @@ void Ui::Impl::bindKeys() {
         else startScan(ScanMemories);
     });
     app.bindKey('K', [this]() { calibrate(); });
-    std::function<void()> showHelp = [this]() {
-        help.place(screen(), std::min(90, app.surface().width() - 2));
-        help.bounds.height = std::min(app.surface().height() - 2, 20);
-        app.openPopup(help, true);
-    };
+    app.bindKey('T', [this]() { setClock(); });
+    std::function<void()> showHelp = [this]() { this->showHelp(); };
     app.bindKey(KeyF1, showHelp);
     app.bindKey('h', showHelp);
     app.bindKey('?', showHelp);
     app.bindKey('q', [this]() { app.quit(); });
     app.bindKey('Q', [this]() { app.quit(); });
     app.onUnhandled = [this](const Event& e) {
+        // The frequency display: click types a new one, the wheel tunes.
+        if (e.type == EventType::Mouse && freqText.bounds.contains(e.x, e.y)) {
+            if (e.button == MouseButton::WheelUp) tune(radio.settings().frequency + step());
+            else if (e.button == MouseButton::WheelDown) tune(radio.settings().frequency - step());
+            else if (e.button == MouseButton::Left && e.action == MouseAction::Press) this->askFrequency();
+            return;
+        }
         if (e.type != EventType::Key || !e.shift) return;
         if (e.key == KeyRight) tune(radio.settings().frequency + 10 * step());
         if (e.key == KeyLeft) tune(radio.settings().frequency - 10 * step());
@@ -1075,10 +1309,13 @@ void Ui::Impl::update() {
     meter.update(snap.channelDbfs, 0.4);
     meter.valueText = fmt("%5.1f dB", snap.channelDbfs) + fmt("  SNR %4.1f", snap.channelDbfs - snap.noiseDbfs);
     if (framesSinceStart % 3 == 0) levelHistory.push(snap.channelDbfs, 512);
-    std::time_t now = std::time(0);
-    char clock[16];
-    std::strftime(clock, sizeof(clock), "%H:%M:%S UTC", std::gmtime(&now));
-    clockLabel.text = clock;
+    // The clock: corrected by time signals when set (marked with a dot).
+    double corrected = clock.now(pcNow());
+    std::time_t now = static_cast<std::time_t>(corrected);
+    char clockText[24];
+    std::strftime(clockText, sizeof(clockText), "%H:%M:%S UTC", std::gmtime(&now));
+    clockLabel.text = std::string(clock.baseAt() > 0 ? "\xE2\x80\xA2" : "") + clockText;
+    clockLabel.tooltip = clock.sourceText(pcNow());
     clockLabel.align = Align::Right;
 
     // Spectrum window.
@@ -1143,9 +1380,9 @@ void Ui::Impl::update() {
             Plot::Marker m = {l.hz, lerp(t.background, t.text, 0.55), l.text};
             spectrum.markers.push_back(m);
         }
-        if (snap.decoderOn && s.mode == dsp::Mode::USB) {
+        if (snap.decoderOn && s.mode == dsp::Mode::USB && s.decoderShift > 0) {
             if (!probe || probe->kind() != snap.decoderKind) probe = dec::makeDecoder(snap.decoderKind);
-            double toneHz = snap.decoder.toneHz > 0 ? snap.decoder.toneHz : probe->audioCenterHz();
+            double toneHz = snap.decoder.toneHz > 0 ? snap.decoder.toneHz : (probe ? probe->audioCenterHz() : s.decoderShift);
             Plot::Marker m = {s.frequency - s.decoderShift + toneHz, t.good, std::string()};
             spectrum.markers.push_back(m);
         }
@@ -1160,6 +1397,11 @@ void Ui::Impl::update() {
         std::string text;
         radio.takeDecoderText(text);
         decoderView.addText(text);
+        if (decoderView.lineMode) {
+            std::vector<dec::PictureLine> lines;
+            radio.takeDecoderLines(lines);
+            decoderView.addLines(lines);
+        }
         if (decoderView.picture) {
             std::vector<std::vector<float> > cols;
             radio.takeDecoderColumns(cols);
@@ -1207,6 +1449,10 @@ void Ui::Impl::update() {
                    (snap.audioUnderruns ? fmt(" gaps %.0f", static_cast<double>(snap.audioUnderruns)) : std::string()));
     if (snap.samplesDropped) status.addLeft(fmt("dropped %.0f", static_cast<double>(snap.samplesDropped)), t.accentText, t.warn);
     if (radio.recording()) status.addLeft(fmt("REC %.0f s", radio.recordedSeconds()), t.accentText, t.bad);
+    if (noticeFrames > 0) {
+        --noticeFrames;
+        status.addLeft(notice, t.accentText, t.good);
+    }
     if (scanKind != ScanOff)
         status.addLeft(scanKind == ScanBand ? "scanning band (n stops)" : "scanning memories (N stops)", t.accentText, t.warn);
     status.addRight("F1 help  Enter freq  d decoder  M memory  b lists  q quit");
@@ -1218,10 +1464,22 @@ Ui::Ui(Radio& radio, const Options& options, Store& store) : impl_(new Impl(radi
 Ui::~Ui() {}
 
 int Ui::run() {
+    {
+        std::ifstream in((Store::directory() + "/clock.txt").c_str());
+        std::stringstream text;
+        text << in.rdbuf();
+        if (in) impl_->clock.load(text.str());
+    }
     terminal::Session session;
     if (impl_->options.mouse) session.enableMouse(true);
     impl_->app.run(session, 30, [this]() { impl_->update(); });
+    if (impl_->decoderView.lineMode && !impl_->decoderView.rows.empty())  // a picture still on screen
+        impl_->savePicture(impl_->decoderView.pictureImage(), dec::kindName(impl_->snap.decoderKind));
     impl_->saveState();
+    {
+        std::ofstream out((Store::directory() + "/clock.txt").c_str());
+        out << impl_->clock.save();
+    }
     return 0;
 }
 

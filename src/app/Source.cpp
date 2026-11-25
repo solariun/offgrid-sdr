@@ -27,6 +27,7 @@
 #include "Source.h"
 
 #include <netdb.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -38,7 +39,10 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../decoders/Ax25Encoders.h"
 #include "../decoders/FskEncoders.h"
+#include "../decoders/PictureEncoders.h"
+#include "../decoders/TimeEncoders.h"
 #include "../decoders/PskEncoders.h"
 #include "../dsp/Receiver.h"
 #include "../rtlsdr/RtlSdr.h"
@@ -61,14 +65,18 @@ void SampleQueue::push(const std::uint8_t* data, std::size_t length) {
         spare_.push_back(std::vector<std::uint8_t>());
         spare_.back().swap(blocks_.front());
         blocks_.pop_front();
+        times_.pop_front();
         ++dropped_;
     }
     blocks_.push_back(std::vector<std::uint8_t>());
     blocks_.back().swap(block);
+    timeval tv;
+    gettimeofday(&tv, 0);
+    times_.push_back(tv.tv_sec + tv.tv_usec * 1e-6);
     ready_.notify_one();
 }
 
-bool SampleQueue::pop(std::vector<std::uint8_t>& block, int timeoutMs) {
+bool SampleQueue::pop(std::vector<std::uint8_t>& block, int timeoutMs, double* arrived) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (blocks_.empty()) ready_.wait_for(lock, std::chrono::milliseconds(timeoutMs));
     if (blocks_.empty()) return false;
@@ -78,12 +86,15 @@ bool SampleQueue::pop(std::vector<std::uint8_t>& block, int timeoutMs) {
     }
     block.swap(blocks_.front());
     blocks_.pop_front();
+    if (arrived) *arrived = times_.front();
+    times_.pop_front();
     return true;
 }
 
 void SampleQueue::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
     blocks_.clear();
+    times_.clear();
 }
 
 std::size_t SampleQueue::size() const {
@@ -444,13 +455,59 @@ void addDecoderStations(dsp::DemoSource& demo) {
     dec::synthHell("OFFGRID HELL 73", r, a);
     append(a, silence(2, r));
     demo.addAudioStation(14063500 - 1000, a, r, -38, dsp::Mode::USB, "HELL");
+
+    // Phase 3. Weather fax on 7880 kHz (dial 1.9 kHz below): a test chart.
+    {
+        std::vector<unsigned char> grey;
+        dec::testChartGrey(dec::faxWidth, 200, grey);
+        a.clear();
+        dec::synthFax(grey, dec::faxWidth, 200, r, a);
+        append(a, silence(10, r));
+        demo.addAudioStation(7880000 - 1900, a, r, -36, dsp::Mode::USB, "FAX 120 LPM");
+    }
+    // SSTV on 14.230 MHz (USB, dial on the frequency): Martin M1 test card.
+    {
+        std::vector<unsigned char> rgb;
+        dec::testCardRgb(320, 256, rgb);
+        a.clear();
+        dec::synthSstv(44, rgb, r, a);
+        append(a, silence(8, r));
+        demo.addAudioStation(14230000, a, r, -38, dsp::Mode::USB, "SSTV Martin M1");
+    }
+    // APRS on 144.800 MHz (NFM, 1200 Bd): the browser demo's packets.
+    {
+        std::vector<dec::AprsSample> packets = dec::aprsDemoPackets();
+        a.clear();
+        for (size_t i = 0; i < packets.size(); ++i) {
+            dec::synthAx25(dec::ax25UiFrame(packets[i].source, packets[i].destination, packets[i].path, packets[i].info), r, a);
+            append(a, silence(1.5, r));
+        }
+        demo.addAudioStation(144800000, a, r, -40, dsp::Mode::NFM, "APRS");
+    }
+    // Time stations, locked to the computer's clock: their code starts at
+    // `now` and every (re)build plays the sample for the present moment
+    // (5 minutes, then the code repeats and no longer matches the clock).
+    {
+        timeval tv;
+        gettimeofday(&tv, 0);
+        const double now = tv.tv_sec + tv.tv_usec * 1e-6, tr = 8000;
+        demo.addAudioStation(7850000 - 1000, dec::enc::timeSignalAudio(dec::TimeStation::Chu, now, 300, tr), tr, -34,
+                             dsp::Mode::USB, "CHU", now);
+        demo.addAudioStation(10000000 - 1000, dec::enc::timeSignalAudio(dec::TimeStation::Wwv, now, 300, tr), tr, -34,
+                             dsp::Mode::USB, "WWV", now);
+    }
 }
 
 class DemoSourceImpl : public PacedSource {
 public:
-    DemoSourceImpl(double rate, double center) : PacedSource(rate, center), demo_(rate, center) { addDecoderStations(demo_); }
+    DemoSourceImpl(double rate, double center) : PacedSource(rate, center), demo_(rate, center) {}
     ~DemoSourceImpl() { stopThread(); }
-    bool start(std::string&) { return startThread(); }
+    bool start(std::string&) {
+        // Built now, just before the first sample: the time stations' code
+        // then starts at the computer's present time.
+        addDecoderStations(demo_);
+        return startThread();
+    }
     std::string name() const { return "demo (simulated stations)"; }
     bool setSampleRate(double) { return false; }  // the demo runs at one rate
 
