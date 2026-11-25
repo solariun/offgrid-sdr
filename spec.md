@@ -1,4 +1,4 @@
-# OFFgrid-SDR TUI — Specification (SDD), v0.4.0
+# OFFgrid-SDR TUI — Specification (SDD), v0.5.0
 
 **What it is.** `offgrid` is a C++11 port of OFFgrid-SDR, the single-file browser receiver by diddy-boy, to a
 **text terminal on Linux and macOS**. It drives an RTL-SDR stick through **its own driver** (no librtlsdr, no
@@ -8,7 +8,11 @@ mode buttons, lights, S-meter, spectrum, waterfall, band list, controls, RDS, st
 painter and a widget toolkit (§9). It builds into **one binary with no third-party libraries**: fully static on
 Linux, OS libraries only on macOS (§0.2 D6).
 
-**Status (2026-11-25): phases 1 (`46da55f`), 2 (`254ddd6`) and 3 (`0f92db6`) committed; phase 4 built, measured and committed.** Phase 4 adds ACARS, VDL2, AIS, FT8, FT4, WSPR, offline callsign/locator tools, the Heard list, a decoder thread (D18) and `--locator`. **First live data decode:** VDL2 from a real aircraft (E33).
+**Status (2026-11-25): phases 1–4 committed; phase 5 built, measured and tested — the port is complete.** Phase 5 adds
+DAB/DAB+ and DRM with their sound (a new codec library: AAC and MP2), AUTO, the Signal Monitor, the clean-up filters
+with the RNNoise voice cleaner, peak hold and new-signal alerts, the likely-bands guide, the band survey, IQ history
+with replay and saving, spectrum snapshots, setup, backup/restore, the upconverter and SDRconnect (SDRplay)
+(§6d). **Live:** DAB+ from a real multiplex with sound (E40). Phase 4 adds ACARS, VDL2, AIS, FT8, FT4, WSPR, offline callsign/locator tools, the Heard list, a decoder thread (D18) and `--locator`. **First live data decode:** VDL2 from a real aircraft (E33).
 Phase 3 adds weather fax, SSTV, time signals with the clock correction, AX.25/APRS (on Gustavo's AX25Toolkit, brought
 forward from phase 4 at his request), PNG pictures, and full mouse use (D14). Phase 2 adds
 six decoders (CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber), memories, frequency labels, a logbook, a settings
@@ -31,6 +35,9 @@ file and the code disagree, the disagreement is a defect to be resolved here fir
 
 | Date | Change |
 |---|---|
+| 2026-11-25 | **Phase 5** (v0.5.0): `src/codecs/` (liboffgrid-codecs: `Aac.*` + the FAAD2 port `Aac*.cpp`, `Mp2.*`), `src/sdrconnect/` (liboffgrid-sdrconnect: `WebSocket.*`, `SdrConnect.*`), `src/decoders/Dab*.{h,cpp}`, `Drm*.{h,cpp}`, `src/dsp/AudioFilters.*`, `VoiceCleaner.*`, `RnnoiseModel.cpp`, `AutoMode.*`, `SignalMonitor.*`, `Propagation.*`, `SpectrumTools.*`; tests `test_codecs`, `test_sdrconnect`, `test_filters`, `test_analysis`, `test_decoders_dab`, `test_decoders_drm` with `tests/data/`; Decoder.h gains `Kind::Dab/Drm`, `Service`, `EncodedImage`, decoder sound (`hasAudio`/`audioRate`/`takeAudio`), `services`/`selectService`, `takeImages`; ReceiverConfig gains the filters; Radio gains decoder sound with a jitter buffer (D21), decoder commands and services, centre-on-dial, the upconverter, the 20 s IQ history, replay and IQ saving, AUTO and the Signal Monitor (D22), filter settings; DecoderPlan gains `centerOnDial`; Bands gains the DAB channel table; Source gains SDRconnect; the demo band gains DAB (12A) and two DRM stations (D24); Ui gains AUTO, Filters ▾, Monitor ▾, View ▾, Replay, Save IQ, Snapshot, Setup, Survey, the Monitor tab, the likely-bands lines, DAB/DRM station lists and slides, a two-row toolbar; options `--sdrconnect`, `--upconverter`, `--backup`, `--restore`; version 0.5.0. |
+| 2026-11-25 | Defects found in phase 5 and fixed the same day: AUTO added the decoder shift to its frequency, which is already the signal's (D12; RTTY still locked, PSK did not) and skipped the retune when the same decoder was already on; `Kind` names lacked DAB and DRM (`--decoder dab` refused, menu and AUTO could not name them); decoder sound was dropped whole when 0.5 s was queued and topped the sound card to 1.6 s although its ring holds ~1 s (DRM gaps; E42); the fifth side tab did not fit 34 columns (Graphicx compact tabs). |
+| 2026-11-25 | **Graphicx**: `Tabs` drop their padding when the padded names would not fit; `tests/test_ui.cpp` 140 checks. |
 | 2026-11-25 | **Phase 1 written**: `src/usb`, `src/rtlsdr`, `src/dsp`, `src/audio`, `src/app`, `tools/rtl-probe.cpp`, `tests/test_dsp.cpp`, `Makefile`, `TUI.md`, this file; Graphicx added as the submodule `external/Graphicx`; README.MD points to TUI.md. |
 | 2026-11-25 | **Graphicx extended** (Graphicx `c06f4d5`, the submodule's commit): `color.h` (colormaps, themes), `canvas.h` (pixel drawing, two fonts), `ui.h` (Surface, Painter, DotCanvas, Display, layout), `widgets.h` (App and ~25 widgets), events and mouse in `terminal.h`; `tests/test_ui.cpp` (124 checks), `examples/canvas.cpp`, `examples/dashboard.cpp`. The existing picture API is unchanged (its 62 checks still pass). |
 | 2026-11-25 | **Phase 4**: `src/decoders/Acars.*`, `Vdl2.*`, `AviationEncoders.*`, `Ais.*`, `AisEncoders.*`, `Ftx.*`, `Ft8.*`, `Callsign.*`, `Heard.*`, `Wspr.*`, `WsprEncoders.*`; tests `test_decoders_aviation.cpp`, `test_decoders_ais.cpp`, `test_decoders_ftx.cpp`, `test_decoders_wspr.cpp`; Decoder.h gains `Kind::Acars/Vdl2/Ais/Ft8/Ft4/Wspr`, `wantsIq`/`processIq` and `setClockOffset`; Radio runs decoders on a worker thread with a bounded job queue (D18), keeps the Heard list, hands FT8/FT4/WSPR slot timings to the clock, passes the dial and the locator; DemoSource gains AM-envelope and burst stations; the demo band gains ACARS, VDL2, AIS, FT8, FT4 and WSPR stations; the Ui gains the Heard tab; options `--locator`. |
@@ -89,6 +96,13 @@ problems (**P**), §12 the plan for the next phases, §13 the glossary. "As buil
 | D17 | **The clock correction is kept in `clock.txt`** (`dec::ClockCorrection::save()`), with the JS sign (offset = PC − true); **T** sets it from a full time code. | Same rules as the browser version (drift from two readings ≥ 0.5 day apart). |
 | D18 | **Decoders run on their own thread.** The DSP thread queues each block's decoder input (audio tap or IQ, timestamp, clock offset, dial, centre); the worker creates/resets the decoder and publishes text, pictures, status, Heard notes and slot timings under the Radio mutex. The queue holds about 2 s; older jobs are dropped and counted. | FT8/WSPR slot decodes take 0.2–0.8 s of CPU; on the DSP thread they would stall the sound and overflow the 0.5 s sample queue. |
 | D19 | **FT8/FT4/WSPR slot timings correct the clock automatically** (ClockCorrection::applyFtxTimings), as the browser version does. | Same behaviour as the browser version. |
+| D20 | **DAB/DRM sound through our own codec library** (liboffgrid-codecs): FAAD2 (AAC-LC, HE-AAC, HE-AAC v2, DRM ER-AAC, 960/1024) and pl_mpeg's MP2 ported to C++11, required (no optional build). Damaged-input changes marked "OFFgrid-SDR" (rebuild on FAAD2 errors 21/23, no implicit SBR when the config says none, DRC gains not sticky). | D5 (no third-party libraries) and the browser version's choice of decoders; output is sample-for-sample FAAD2/pl_mpeg's (E36). |
+| D21 | **Decoders with their own sound replace the receiver's**: resampled linearly to the sound card's rate, with volume and mute, through a FIFO that pre-buffers (DRM 1.6 s, DAB 0.4 s) and keeps the card's queue at 0.7 s; more than 4 s waiting drops the oldest. | DRM decodes in 1.2 s windows; the card's ring holds about 1 s; decoder jobs arrive every 0.1–0.3 s (E42). |
+| D22 | **AUTO and the Signal Monitor listen to the raw IQ on the DSP thread** (their own mutex; AUTO's analysis ~25 ms once). AUTO's `tuneHz` is the signal's frequency, the dial's meaning in decoder modes (D12); DAB from AUTO must lock within 6 s, else NFM. | Same inputs as the browser version; cheap enough for the DSP thread (monitor < 1 % for 8 signals). |
+| D23 | **Clean-up filters off by default except the limiter** (the browser version's default), kept in the settings; they act on AM/SAM/USB/LSB (blanker and hum also CW); decoders hear the audio before them. | With them off the receiver's output is bit for bit what it was (E38). |
+| D24 | **The demo band carries DAB and DRM**: the browser version's DAB multiplex on 12A, made on the fly only while the stick is within 300 kHz of it (1.5 MHz wide, ~2 % of a core); DRM's two stations as 48 kS/s loops (11.700 and 11.750 MHz). | A 12 s DAB loop at 2.048 MS/s would be ~190 MB. |
+| D25 | **SDRconnect through our own WebSocket client** (RFC 6455, no TLS), its JSON and IQ stream converted to u8 IQ for the same chain. | D5. |
+| D26 | **20 s IQ history** (raw bytes, a ring) for *Replay* (a second Receiver following the live settings, paced in real time) and *Save IQ* (`.cu8`). | The browser version's waterfall replay; the saved file plays with `--file`. |
 | D10 | **No Linux cross-compiler was installed** (`brew install zig` declined by Gustavo, 2026-11-25). | Linux code is syntax-checked against stub headers only until a Linux build is run (P1). |
 
 ### 0.3 Development standards: the definition of done
@@ -127,6 +141,12 @@ Layer, What this file does, How it fits in, Contributing). Commits carry no co-a
 | `examples/fm-radio.cpp`, `examples/decode.cpp` | the libraries used on their own |
 | `tools/rtl-probe.cpp` | driver smoke test |
 | `tests/test_dsp.cpp`, `tests/test_decoders_fsk.cpp`, `tests/test_decoders_psk.cpp` | self-tests (PASS/FAIL lines, exit code) |
+| `src/decoders/Dab*.{h,cpp}`, `Drm*.{h,cpp}` | DAB/DAB+ and DRM receivers, their transmitters (demo, tests) and demo data |
+| `src/codecs/` | liboffgrid-codecs: `Aac.h` (`codec::AacDecoder`), `Mp2.h` (`codec::Mp2Decoder`), the FAAD2 port (`Aac*.cpp`/`.h`, internal) |
+| `src/dsp/AudioFilters.*`, `VoiceCleaner.*`, `RnnoiseModel.cpp` | noise blanker, noise reduction, hum filter, auto/smart notch, limiter, DC blocker; RNNoise and the voice cleaner |
+| `src/dsp/AutoMode.*`, `SignalMonitor.*`, `Propagation.*`, `SpectrumTools.*` | AUTO, the Signal Monitor (+ signal analyser, channel extractor), the propagation guide, peak hold / averaging / alerts |
+| `src/sdrconnect/` | liboffgrid-sdrconnect: `WebSocket.*`, `SdrConnect.*` (`sdrc::Client`) |
+| `tests/data/` | codec reference streams and hashes, the live DAB log |
 | `external/Graphicx` | git submodule, MIT |
 | `Makefile`, `TUI.md`, `spec.md`, `.gitignore` | build, user guide, this file |
 
@@ -134,12 +154,12 @@ Layer, What this file does, How it fits in, Contributing). Commits carry no co-a
 
 | Target | Result |
 |---|---|
-| `make libs` | `build/lib/liboffgrid-{rtlsdr,dsp,decoders,audio}.a` |
+| `make libs` | `build/lib/liboffgrid-{rtlsdr,dsp,decoders,codecs,audio,sdrconnect}.a` |
 | `make examples` | `bin/example-fm-radio`, `bin/example-decode` |
-| `make install` | the four libraries into `$(PREFIX)/lib`, headers into `$(PREFIX)/include/offgrid/{usb,rtlsdr,dsp,decoders,audio}` |
+| `make install` | the six libraries into `$(PREFIX)/lib`, headers into `$(PREFIX)/include/offgrid/{usb,rtlsdr,dsp,decoders,codecs,audio,sdrconnect}` |
 | `make` | `bin/offgrid` (links the four libraries and Graphicx). Linux: `-static -pthread` (R1.1); macOS: `-framework IOKit -framework CoreFoundation -framework AudioToolbox`. Stops with a message when `$(GRAPHICX)/include/graphicx/widgets.h` is missing. |
 | `make tools` | `bin/rtl-probe` |
-| `make test` | builds and runs every `tests/test_*.cpp` (`bin/test_dsp`, `bin/test_decoders_fsk`, `bin/test_decoders_psk`) |
+| `make test` | builds and runs every `tests/test_*.cpp` (16 programs, 1,090 checks, E35) |
 | `make check-static` | macOS: `otool -L bin/offgrid`; Linux: `file` and `ldd` |
 | `make clean` | removes `build/` and `bin/` |
 | Variables | `GRAPHICX=path` (default `external/Graphicx`), `STATIC=0` (Linux dynamic), `CXX` |
@@ -200,6 +220,25 @@ the corrected clock shown and kept (D17).
 
 **R16 Phase 4 decoders.** ACARS (AM), VDL2 (IQ, all channels), AIS (IQ, both channels), FT8, FT4, WSPR (slots by
 the corrected clock); countries, distance and bearing from `--locator`; the Heard summary.
+
+**R17 Digital broadcast.** R17.1 DAB/DAB+ from IQ at 2.048 MS/s: lock, FIC, ensemble and stations, DAB+ (HE-AAC
+v2) and MP2 sound, DLS text, MOT slideshow, SPI logos, station choice (j/k, mouse), channel stepping 5A–13F.
+R17.2 DRM from IQ ≥ 48 kS/s: modes A–D, all occupancies, 4/16/64-QAM, FAC/SDC, services, AAC sound, text, slideshow,
+Journaline. R17.3 Sound without gaps once buffered (D21).
+
+**R18 AUTO.** Identify the signal near the dial (by listening, or by frequency) and set mode, tuning and decoder.
+
+**R19 Signal Monitor.** Up to 8 signals measured continuously: level, S/N, transmissions, occupancy, interval,
+fades, drift, Follow; CSV log.
+
+**R20 Clean-up filters.** Noise blanker, noise reduction (3 levels), hum filter 50/60 Hz, auto notch, AI voice
+cleaner (RNNoise, 4 strengths), limiter with retune mute; persistent (D23).
+
+**R21 Spectrum extras and guides.** Peak hold, averaging, new-signal alerts; likely bands open from the locator;
+band survey (FT8 80–10 m).
+
+**R22 Sources and keeping.** SDRconnect (`--sdrconnect`); HF upconverter offset (`--upconverter`); 20 s IQ
+history with replay and `.cu8` saving; spectrum/waterfall snapshot PNG; `--backup` / `--restore`.
 
 **R8 Headless.** `--headless N`: one status line per second for N seconds (level, noise, measured rate, DSP load,
 sound queue and gaps, drops, stereo, overload, RDS, strongest spectrum peaks).
@@ -355,6 +394,32 @@ hand settings, FT8 nudging). **AX.25** (`Ax25.*`, `ax25/`): up to 5 slicers (Dir
 and byte-boundary closing flag, AX.25 address/control/PID, APRS (positions plain/compressed/Mic-E, weather,
 messages/acks/bulletins, status, objects, items, telemetry, third-party), distance/bearing from a home.
 
+## 6d. Phase 5 (as built)
+
+**DAB** (`Dab*.cpp`, D20): the browser version's receiver, mode I at exactly 2.048 MS/s: null-symbol/guard
+correlation lock with a re-lock that forgives gaps, coarse and fine frequency (±40 kHz), DQPSK, FIC (FIGs 0/1/2:
+ensemble, services, sub-channels, labels, programme types), time de-interleaving, EEP/UEP, Viterbi, energy
+dispersal; DAB+ super frames (fire code, RS(120,110)) → AUs → AAC; MP2 frames; X-PAD: DLS, MOT slideshow; the SPI
+logo service. A dial within 768 kHz of a channel names it; the stick's offset from the centre is mixed out.
+Default station: the first in label order about 3 s after the list is complete. **DRM** (`Drm*.cpp`): front end
+(mix, decimate to 48 kHz, 16 kHz cut), mode/timing from the guard correlation, followed fine frequency, carrier
+offset from the frequency pilots, frame start from the time references, pilot-based channel estimate, FAC, SDC
+(4/16-QAM), MSC cell de-interleaving and multilevel Viterbi with iterated passes; AAC super frames → AUs (the CRC
+byte goes to the codec, which checks it); text messages, packet mode, MOT slideshow, Journaline (with inflate). A
+6 s window analysed every 1.2 s of signal (sample-counted, deterministic). **Codecs** (`src/codecs`, D20).
+**Sound** (D21). **AUTO** (`AutoMode.*`, D22): ~2 s of IQ near the dial: FSK shift/baud, PSK, Morse, OOK, FM, AM,
+carrier, SSB (carrier from voice harmonics), FT8/WSPR/time by frequency and content, a flat 10 kHz block = DRM;
+by frequency alone DAB, airband/ACARS/VDL2, AIS, APRS, PMR446, CB, marine, FM broadcast; one more listen, then a
+fall-back. **Signal Monitor** (`SignalMonitor.*`): its own ~100 Hz-bin spectrum, 10 measurements a second,
+transmissions by hysteresis, Follow moves the band with the signal's centre. **Filters** (`AudioFilters.*`,
+`VoiceCleaner.*`, D23): order hum → auto notch → smart notch → voice cleaner → noise reduction → retune mute →
+limiter → squelch/volume; the blanker on a copy of the raw IQ. **Propagation** (`Propagation.*`): MUF/LUF from the
+sun's elevation at the place (locator, else the time zone), bands rated open / possible / unlikely. **Alerts**
+(`SpectrumTools.*`): a signal where nothing was for 2 minutes, after 10 s of learning. **Interface**: toolbar
+(wraps to row 4), Filters ▾ / Monitor ▾ / View ▾ menus, keys A, F, O, j/k; the Monitor tab (two lines a signal);
+the Heard tab opens with the likely-bands lines; watched signals shaded on the spectrum, alerts marked "new";
+DAB/DRM: station list, text and the latest slide in the decoder panel.
+
 ## 9. Graphicx contract (as built)
 
 The program relies on these Graphicx features, added for it and documented in Graphicx's README (MIT):
@@ -363,7 +428,8 @@ kitty `u` keys, UTF-8); `ui::Surface/Painter/Display` (only changed cells; since
 sent; synchronized output); `ui::DotCanvas`; `PixelMode` HalfBlocks/Quadrants/Braille/Ascii; `ui::App` (focus,
 mouse capture, popups, `bindKey`, `onUnhandled`, `onLayout`, `autoFocus`, `clearFocus`); widgets `BigText`,
 `RadioGroup`, `Led`, `Meter`, `Sparkline`, `Plot` (bands, markers, max decimation, `onMouse`), `Waterfall`
-(`addRow`, markers, colormap), `ListBox`, `Slider`, `Toggle`, `Panel`, `Label`, `StatusBar`, `Dialog`, and
+(`addRow`, markers, colormap), `ListBox`, `Slider`, `Toggle`, `Panel`, `Label`, `StatusBar`, `Dialog`, `Menu`
+(checked items), `Tabs` (compact when narrow), `gfx::loadImageFromMemory` (slides), `savePng`, and
 `color.h` themes/colormaps. A Graphicx change that alters these is a change to this program.
 
 ## 10. Validation evidence
@@ -405,6 +471,16 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | E31 | Phase 4 demo band through the radio | ACARS all messages; VDL2 3 channels with ACARS-over-AVLC, acks, ATN; AIS both channels, 6 vessels with every field; WSPR G4OGR and K1OGS at −22/−26 dB, dt +0.0 s, RF 14.097062/14.097131 MHz (after placing the demo 1 s into the slot and passing the dial); FT8 8–10 decodes a slot with countries and distances from JO21, dt +0.0 s; FT4 contest exchange; DSP thread 2–3 %, 0 gaps, 0 drops |
 | E32 | Heard tab (pty capture) | "20 m: 7 stations, 7 countries" after a minute of FT8 demo |
 | E33 | **Live on the stick** | **VDL2 136.975 MHz: a real frame, 486649 (Netherlands) → ground, PH-CDQ, flight CD040P, label H1** (3 min, gain 28 dB); ACARS 131.725 MHz: none in 3 min; AIS 162.000 MHz: none in 4 min (inland, indoor antenna) |
+| E34 | Strict C++11 (D4) over all 139 sources (`src/`, `tests/`, `examples/`, `tools/`, Graphicx) | no error, no warning |
+| E35 | `make test`, 16 programs | **1,090 checks, 0 failed**: codecs 102, DAB 33, DRM 55, filters 49 (53 with the RNNoise reference file), analysis 61, SDRconnect 75, DSP 82, and the phase 2–4 suites unchanged |
+| E36 | Codecs vs the original C (scratch harnesses) | every test stream bit-identical to FAAD2 / pl_mpeg; 180k damaged AUs differential: 0 mismatches; 3,059 random MP2 frames identical; ASan+UBSan 200k damaged units clean; real time ×530 (DRM) to ×3600 (MP2) |
+| E37 | DAB / DRM self-tests | DAB: the demo multiplex's 845/848 AUs byte-identical, 0 bad super frames, DLS, 2 slides, 4 logos, sound RMS 0.10; at 6 dB SNR, 150 kHz off centre, an SFN echo and 50,000 lost samples still decodes. DRM: 660 AUs byte-exact and 660 decoded to PCM (RMS 0.118), text, PNG, 4 Journaline pages; modes A–D, 5–20 kHz, 16/64-QAM, echo, mirrored, 480 kS/s; nothing from noise; 5.3 % of a core at 2.048 MS/s |
+| E38 | Filters | RNNoise port 950/950 frames bit-identical to the C reference (same compiler flags); receiver output with every filter off bit-identical to before (7 modes, hashes); voice cleaner Full: channel noise −50.8 dB, voice −0.1 dB; hum harmonics −130 dB; limiter peak 0.950 |
+| E39 | AUTO on the demo band through the TUI | RTTY 45.45/170 (decoder locked, "QUQ DE OFFGRID"), CW (21 WPM text), PSK31 at 14.070.994 (locked, text), PSK63 (text), NAVTEX (message), FT8 (4 signals), WWV (ticks), fax, SSTV, WFM recognised and set; DSC burst station misread as weak LSB voice (P25) |
+| E40 | **Live DAB on the stick** (5A, 174.928 MHz, gain 35 dB), TUI | **EINDHOVEN-KEMPEN (8652), 8 DAB+ stations; Glow FM HE-AAC 32 kHz stereo playing with DLS ("Ella Langley - Choosin' Texas"); j → KempenFM HE-AAC 48 kHz**; FIC 99–100 %, SNR 6–7 dB, DSP 6 %. Agent run, 40 s: 295 super frames / 0 bad, 786 AUs / 0 CRC failures, 0 lock losses (`tests/data/dab_live_5A.txt`). 11C/12C/5C/6A/6B/7D/8A: no multiplex here |
+| E41 | DAB and DRM demo stations in the TUI | DAB 12A: "OFFgrid DAB", both stations, DLS, slide shown; DRM 11.7 MHz: "OFFgrid DRM" mode B 64-QAM MER 22 dB, text, slide; both with sound |
+| E42 | Decoder sound | before D21: DRM 20–25 gaps in 30 s (the card's ~1 s ring overfilled to 1.6 s, then ran dry between 1.2 s windows); after: 0 gaps, DRM queue ~0.7 s, DAB ~0.4 s; offline DRM gives exactly 1.2 s of audio per 1.2 s of signal |
+| E43 | Toolbar actions in a pty (mouse clicks) | Filters menu with ✓ marks; Monitor list and CSV (`offgrid-monitor-….csv`); Save IQ (55 MB `.cu8` of the history); Snapshot PNG (1024 px: header, spectrum, waterfall; viewed); Replay ("REPLAY 7.2 s", back to live); five side tabs in 34 columns |
 | E14 | Graphicx `make test` | 62 picture checks + 124 interface checks, 0 failures; `example-dashboard` driven in a pty (keys, mouse, theme change, menu, quit) |
 
 ## 11. Open problems
@@ -433,6 +509,12 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | P16 | AX25Toolkit has no LICENSE file; its code is used with its author's permission (D15). | Add a license to AX25Toolkit (GPL-2.0-or-later or compatible). |
 | P17 | AX.25 9600 Bd needs flat discriminator audio at ≥ 38.4 kHz; the receiver's NFM audio is de-emphasised and 3 kHz wide. | A flat FM tap in the Receiver. |
 | P18 | Time decoding was not tried on real HF signals (the stick has no HF input). | Test with direct sampling or an upconverter. |
+| P24 | xHE-AAC (DRM's newer codec) is recognised but not played. | Port an xHE-AAC (USAC) decoder (Libxaac is in `licenses/`). |
+| P25 | AUTO reads the demo's DSC station (short bursts) as weak LSB voice when it lands between bursts. | Listen again while bursts come and go; the browser version shares this. |
+| P26 | DAB classic MP2, 24 kHz MP2, UEP and EEP-B checked only on the demo; the station list sorted by bytes, not locale; DAB `snrDb` uncapped on a noiseless signal; no slides/logos seen on the live 5A multiplex; ~3 gaps when switching stations of different rates. | More live multiplexes; cap the SNR. |
+| P27 | DRM not tried live (no HF input); hierarchical 64-QAM, UEP and CELP/HVXC unsupported (as the browser version). | Upconverter or direct sampling. |
+| P28 | Codecs, filters and DAB/DRM not built with GCC (P1); FAAD2/RNNoise bit-exactness depends on floating-point contraction. | The tests check levels as well as bits. |
+| P29 | SDRconnect tested only against a mock server (75 checks); the upconverter, band survey and backup/restore not tried on hardware. | An SDRplay RSP with SDRconnect; an upconverter. |
 | P15 | Calibration needs ≥ 10 dB SNR and several seconds; FM stations can be a few tens of Hz off (0.3 ppm at 100 MHz). | Average two stations; a time signal (WWV 10 MHz) needs HF. |
 
 ## 12. Plan: the next phases
@@ -442,7 +524,7 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | 2 | **Built (2026-11-25):** text decoders on the audio: CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber; memories, logbook, labels, settings file; scan; frequency calibration; the code split into reusable libraries |
 | 3 | **Built (2026-11-25):** weather fax, SSTV, time signals (CHU, WWV, RWM) and the clock; AX.25/APRS (from phase 4); full mouse use |
 | 4 | **Built (2026-11-25):** ACARS, VDL2, AIS, FT8/FT4/WSPR with the Heard list (the band survey is left for phase 5) |
-| 5 | Digital broadcast: DAB/DAB+ and DRM (AAC/xHE-AAC in C++11), AUTO mode, Signal Monitor, waterfall replay, SDRconnect |
+| 5 | **Built (2026-11-25):** DAB/DAB+ and DRM with AAC/MP2 codecs in C++11 (xHE-AAC left, P24), AUTO, Signal Monitor, filters and the AI voice cleaner, alerts, likely bands, band survey, replay, IQ saving, snapshots, setup, backup, upconverter, SDRconnect |
 
 ## 13. Glossary
 
@@ -453,4 +535,8 @@ the stick's artefact at the centre. **WFM/NFM**: wide/narrow FM. **SAM**: synchr
 **RDS**: Radio Data System (PI programme id, PS station name, RT radio text, PTY programme type). **Pilot**: the
 19 kHz tone that marks FM stereo. **usbfs**: Linux's user-space USB interface. **URB**: a USB request block.
 **ALSA**: Linux's sound interface. **Cell**: one character position in the terminal. **Braille / quadrant / half
-block**: Unicode characters used to draw 2x4, 2x2 and 1x2 pixels per cell.
+block**: Unicode characters used to draw 2x4, 2x2 and 1x2 pixels per cell. **DAB/DAB+**: Digital Audio
+Broadcasting (MP2 / HE-AAC), an ensemble (multiplex) of stations in 1.5 MHz. **DRM**: Digital Radio Mondiale,
+digital AM-band broadcasting. **FIC/FAC/SDC**: the channels that describe the multiplex. **AU**: an AAC access
+unit. **DLS**: DAB's now-playing text. **MOT**: the slideshow carriage. **SBR/PS**: HE-AAC's high band and
+parametric stereo. **RNNoise**: a small neural network that separates voice from noise.

@@ -1,9 +1,12 @@
 # liboffgrid-decoders — radio text and picture decoders in C++11
 
-Sixteen decoders behind one interface, each also usable alone through its own
-header. Input: mono demodulated audio (any rate from 8 kHz up). Output: text
-(pictures for fax and SSTV, columns for Hellschreiber, the time and the PC clock's error for time signals). No threads, no devices, no terminal:
-the standard library and liboffgrid-dsp's FFT only.
+Eighteen decoders behind one interface, each also usable alone through its own
+header. Input: mono demodulated audio (any rate from 8 kHz up), or the stick's IQ
+for VDL2, AIS, DAB and DRM. Output: text (pictures for fax and SSTV, columns for
+Hellschreiber, the time and the PC clock's error for time signals; for DAB and
+DRM also sound, a station list and slideshow pictures). No threads, no devices,
+no terminal: the standard library, liboffgrid-dsp's FFT and, for DAB and DRM's
+sound, liboffgrid-codecs.
 
 | Decoder | Header | Class | What it reads |
 |---|---|---|---|
@@ -24,6 +27,8 @@ the standard library and liboffgrid-dsp's FFT only.
 | WSPR | `Wspr.h` | `dec::WsprDecoder` | 2-minute slots, Fano decoder, about −28 dB; finds stations with the clock a minute out; measures the clock and the stick's frequency error |
 | Callsigns, locators | `Callsign.h` | `dec::countryOf`, `dec::Locator` | offline callsign → country (ITU prefixes and areas), Maidenhead ↔ lat/lon, distance and bearing, 620 cities |
 | Heard | `Heard.h` | `dec::HeardList` | every FT8/FT4/WSPR decode, band by band: stations, countries, farthest, open directions, trend |
+| DAB / DAB+ | `Dab.h` | `dec::DabDecoder` | digital radio from IQ at 2.048 MS/s (Band III, 5A–13F): lock, FIC, the ensemble and its stations, DAB+ (AAC) and classic DAB (MP2) sound through liboffgrid-codecs, dynamic label text, MOT slideshow and SPI logos; choose a station with `selectService` |
+| DRM | `Drm.h` | `dec::DrmDecoder` | Digital Radio Mondiale from IQ (48 kS/s up): robustness modes A–D, every occupancy, 4/16/64-QAM, FAC and SDC, up to four services, AAC sound (with SBR/PS) through liboffgrid-codecs, text messages, MOT slideshow, Journaline pages; xHE-AAC is recognised but not played |
 | AX.25 / APRS | `Ax25.h` | `dec::Ax25Decoder` | packet radio: AFSK 1200 (VHF), AFSK 300 (HF), G3RUH 9600; frames with digipeater paths; APRS positions (plain, compressed, Mic-E), weather, messages, status, objects, items, telemetry |
 
 Signal generators for each (tests, demos, training): `FskEncoders.h` (namespace
@@ -31,12 +36,16 @@ Signal generators for each (tests, demos, training): `FskEncoders.h` (namespace
 `PictureEncoders.h` (fax and SSTV transmissions, test pictures), `TimeEncoders.h`
 (CHU, WWV, WWVH, RWM at any UTC time), `Ax25Encoders.h` (AX.25 frames, AFSK/G3RUH
 audio, the demo APRS packets), `AviationEncoders.h` (ACARS audio, VDL2 bursts),
-`AisEncoders.h` (AIS messages and GMSK bursts), `Ftx.h` (FT8/FT4 synthesis) and
-`WsprEncoders.h` (WSPR transmissions).
+`AisEncoders.h` (AIS messages and GMSK bursts), `Ftx.h` (FT8/FT4 synthesis),
+`WsprEncoders.h` (WSPR transmissions), `DabEncoders.h` (the browser version's demo
+multiplex, `dec::DabDemoMultiplex`) and `DrmEncoders.h` (a DRM transmitter for every
+mode and occupancy, and the two demo stations).
 
 FT8/FT4 follow [ft8_lib](https://github.com/kgoba/ft8_lib) by Kārlis Goba (MIT); WSPR
 follows WSJT-X's wsprd (K1JT) and KA9Q's Fano decoder; ACARS follows acarsdec and
-VDL2 dumpvdl2, as the browser version credits. Shared code tables: `Codes.h`.
+VDL2 dumpvdl2, as the browser version credits. DAB follows the browser version's
+receiver (after welle.io / ETSI EN 300 401); DRM follows it and
+[Dream](https://sourceforge.net/projects/drm/) (GPL-2.0-or-later, `licenses/dream-COPYING.txt`). Shared code tables: `Codes.h`.
 
 The AX.25 modem, HDLC and frame code in `ax25/` come from
 [AX25Toolkit](https://github.com/solariun/AX25Toolkit) (Gustavo Campos), whose DSP
@@ -83,8 +92,13 @@ Demodulate in USB with the dial below the signal by the decoder's
 
 Time and slot decoders (TIME, FT8, FT4, WSPR) also need `setTimestamp(unix seconds)`
 before each `process()`: the computer's clock at the block's first sample; slot
-decoders also `setClockOffset()`. IQ decoders (AIS, VDL2: `wantsIq()`) take
-`processIq(iq, n, rate, centerHz, dialHz)` instead of audio. Slot decoders do about
+decoders also `setClockOffset()`. IQ decoders (AIS, VDL2, DAB, DRM: `wantsIq()`) take
+`processIq(iq, n, rate, centerHz, dialHz)` instead of audio. DAB needs exactly 2.048 MS/s
+with the stick within about 200 kHz of the channel's centre (the dial names the channel);
+DRM any rate from 48 kS/s, the dial within about 1.6 kHz of the station (DRM's carrier 0:
+the centre of a 10/20 kHz signal). Both give sound (`hasAudio`, `audioRate`, `takeAudio`:
+interleaved stereo), stations (`services`, `selectService`) and pictures (`takeImages`:
+JPEG/PNG bytes). Slot decoders do about
 0.2–0.8 s of work at each slot's end: call them from a thread of their own. Picture decoders give
 `dec::PictureLine`s through `takeLines()` (a new picture number = a new picture).
 
@@ -95,7 +109,11 @@ decoders also `setClockOffset()`. IQ decoders (AIS, VDL2: `wantsIq()`) take
 SSTV), `tests/test_decoders_time.cpp` (time signals, clock) and
 `tests/test_decoders_ax25.cpp` (AX.25, APRS), `tests/test_decoders_aviation.cpp`
 (ACARS, VDL2), `tests/test_decoders_ais.cpp`, `tests/test_decoders_ftx.cpp` (FT8, FT4,
-callsigns, Heard) and `tests/test_decoders_wspr.cpp`: exact text from the encoders at 48
+callsigns, Heard), `tests/test_decoders_wspr.cpp`, `tests/test_decoders_dab.cpp`
+(the demo multiplex: stations, byte-exact audio units, text, slides, logos, sound;
+noise, frequency error, an echo, lost samples) and `tests/test_decoders_drm.cpp`
+(every mode and occupancy, byte-exact audio units, sound, text, slides, Journaline;
+echo, mirrored spectrum, noise): exact text from the encoders at 48
 and 12 kHz in noise, no false text on noise alone, reset, NaN recovery, speed
 and tone search, and the CPU cost (every decoder runs hundreds of times faster
 than real time).

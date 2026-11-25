@@ -31,7 +31,15 @@
 //          USB/LSB  real part of the one-sided signal, SSB high-pass, AGC
 //          CW   narrow low-pass, BFO at cwPitchHz, AGC
 //     -> fractional Resampler to audioRate (exact on average)
+//     -> [decoder tap]
+//     -> audio clean-up filters, each only when switched on in
+//        ReceiverConfig and only in the modes OFFgrid-SDR allows
+//        (AudioFilters.h, VoiceCleaner.h; the order is the JS's):
+//          hum filter -> auto notch -> smart notch -> AI voice cleaner
+//          -> noise reduction -> retune mute/fade-in -> limiter
 //     -> squelch gate (ramped), volume, clip to -1..1, interleave L R.
+//  The noise blanker works before all of this, on the raw IQ (a copy: the
+//  caller's samples are not changed), as the JS does.
 //
 //  How it fits in
 //  --------------
@@ -55,6 +63,8 @@
 #include "Fft.h"
 #include "Filters.h"
 #include "Rds.h"
+#include "AudioFilters.h"
+#include "VoiceCleaner.h"
 
 #include <algorithm>
 #include <atomic>
@@ -128,7 +138,9 @@ double defaultBandwidth(Mode mode) {
 
 ReceiverConfig::ReceiverConfig()
     : sampleRate(2048000), offsetHz(0), mode(Mode::WFM), bandwidthHz(0), stereo(true), deemphasisUs(50),
-      squelchDb(-200), cwPitchHz(700), agc(true), volume(1) {}
+      squelchDb(-200), cwPitchHz(700), agc(true), volume(1), noiseBlanker(false), noiseBlankerThresholdDb(0),
+      noiseReduction(false), noiseReductionLevel(2), humFilterHz(0), autoNotch(false), smartNotch(false),
+      voiceCleaner(false), voiceCleanerMix(0.75), limiter(false), retuneMuteSeconds(0) {}
 
 RdsInfo::RdsInfo() : pi(0), ps(8, ' '), pty(-1), tp(false), ta(false), music(false), groups(0) {}
 
@@ -354,6 +366,14 @@ struct SamDemod {
 
 inline double clampd(double v, double lo, double hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// Where OFFgrid-SDR runs its filters (JS FILTER_MODES / DIGI_FILTER_MODES):
+// noise reduction, the notches and the AI voice cleaner, which reshape the
+// sound, only in the voice modes; the noise blanker and the hum filter,
+// which only remove impulses and mains hum, also in CW (and the data modes,
+// which the application runs on USB here).
+inline bool voiceMode(Mode m) { return m == Mode::AM || m == Mode::SAM || m == Mode::USB || m == Mode::LSB; }
+inline bool cleanMode(Mode m) { return voiceMode(m) || m == Mode::CW; }
+
 }  // namespace
 
 // ============================================================================
@@ -562,6 +582,131 @@ struct Receiver::Impl {
     }
 
     std::vector<float> tap;  // decoder audio of the last process() call
+
+    // ---- Audio clean-up filters (created on first use) ----------------------
+    std::unique_ptr<NoiseBlanker> nb;
+    std::vector<Complex> nbBuf;  // the blanked copy of the IQ (grows only)
+    bool nbOn = false;
+    std::atomic<unsigned long long> nbBlanked{0}, nbTotal{0};
+    std::unique_ptr<HumFilter> hum;
+    std::unique_ptr<AutoNotch> anf;
+    bool anfOn = false;
+    std::unique_ptr<SmartNotch> sn;
+    double snCurOffset = 0, snAddOffset = 0;  // the JS's curFreq() / snFreq
+    Mode snCurMode = Mode::WFM, snAddMode = Mode::WFM;
+    std::unique_ptr<VoiceCleaner> ai;
+    bool aiOn = false;
+    std::atomic<float> aiVad{0.0f};
+    std::unique_ptr<SpectralNR> nr;
+    bool nrOn = false;
+    std::unique_ptr<Limiter> lim;
+    // Guards sn and anfList, which the smartNotch*() / autoNotches() methods
+    // read from other threads.
+    mutable std::mutex filtMutex;
+    double anfList[3] = {0, 0, 0};
+    int anfCount = 0;
+
+    SmartNotch& smart() {  // (call with filtMutex held)
+        if (!sn) sn.reset(new SmartNotch(audioRate));
+        return *sn;
+    }
+
+    // A retune (or the first tune): new station, so the state that belongs
+    // to the old one starts again, and the retune mute (if set) is armed.
+    void filtersRetuned() {
+        if (anf) anf->reset();
+        if (cfg.retuneMuteSeconds > 0) {
+            if (!lim) lim.reset(new Limiter(audioRate));
+            lim->armRetune(cfg.retuneMuteSeconds);
+        }
+    }
+
+    // The noise blanker on a copy of the raw IQ; returns what the mixer
+    // should read (the caller's samples when the blanker is off).
+    const Complex* blank(const Complex* iq, std::size_t n) {
+        if (!cfg.noiseBlanker || !cleanMode(cfg.mode)) {
+            nbOn = false;
+            return iq;
+        }
+        if (!nb) nb.reset(new NoiseBlanker());
+        if (!nbOn) {
+            nb->reset();
+            nbOn = true;
+        }
+        nb->setSampleRate(cfg.sampleRate);
+        nb->setThresholdDb(cfg.noiseBlankerThresholdDb);
+        if (nbBuf.size() < n) nbBuf.resize(n);
+        std::copy(iq, iq + n, nbBuf.begin());
+        nb->process(&nbBuf[0], n, cfg.offsetHz);
+        nbBlanked = nb->stats().blanked;
+        nbTotal = nb->stats().total;
+        return &nbBuf[0];
+    }
+
+    // The audio filters on the mono audio at audioRate, in the JS's order.
+    void audioFilters(float* x, std::size_t n) {
+        const Mode m = cfg.mode;
+        const double fs = audioRate;
+        const bool voice = voiceMode(m), clean = cleanMode(m);
+        // Hum filter (before noise reduction).
+        if (clean && (cfg.humFilterHz == 50 || cfg.humFilterHz == 60)) {
+            if (!hum) hum.reset(new HumFilter());
+            hum->configure(cfg.humFilterHz, fs);
+            hum->process(x, n);
+        }
+        // Auto notch: steady whistles, in AM, SAM and SSB (not CW: there the
+        // tone IS the signal).
+        if (voice && cfg.autoNotch) {
+            if (!anf) anf.reset(new AutoNotch());
+            if (!anfOn) {
+                anf->reset();
+                anfOn = true;
+            }
+            anf->process(x, n, fs);
+            std::lock_guard<std::mutex> lock(filtMutex);
+            anfCount = anf->count();
+            for (int i = 0; i < anfCount; ++i) anfList[i] = anf->frequency(i);
+        } else if (anfOn) {
+            anfOn = false;
+            std::lock_guard<std::mutex> lock(filtMutex);
+            anfCount = 0;
+        }
+        // Smart notch (AM, SAM, SSB): cleared when you change station.
+        if (voice && cfg.smartNotch) {
+            std::lock_guard<std::mutex> lock(filtMutex);
+            SmartNotch& s = smart();
+            if (s.count() && (snAddMode != m || std::fabs(cfg.offsetHz - snAddOffset) > 2000)) s.clear();
+            s.process(x, n, fs);
+        }
+        // The AI voice cleaner (speech modes).
+        if (voice && cfg.voiceCleaner) {
+            if (!ai) ai.reset(new VoiceCleaner(fs));
+            if (!aiOn) {
+                ai->reset();
+                aiOn = true;
+            }
+            ai->setSampleRate(fs);
+            ai->setMix(cfg.voiceCleanerMix);
+            ai->process(x, n);
+            aiVad = ai->voiceProbability();
+        } else {
+            aiOn = false;
+        }
+        // Noise reduction.
+        if (voice && cfg.noiseReduction) {
+            if (!nr) {
+                nr.reset(new SpectralNR());
+                nr->setSampleRate(fs);
+            }
+            if (!nrOn) {
+                nr->reset();
+                nrOn = true;
+            }
+            nr->process(x, n, cfg.noiseReductionLevel < 1 ? 1 : (cfg.noiseReductionLevel > 3 ? 3 : cfg.noiseReductionLevel));
+        } else {
+            nrOn = false;
+        }
+    }
     // Carrier offset measured by the demodulator (Hz from the tuned
     // frequency): FM = mean discriminator output, SAM = the PLL frequency.
     bool carrierValid = false;
@@ -596,6 +741,9 @@ struct Receiver::Impl {
         if (!built) build();
         if (n == 0) return;
         const Mode mode = cfg.mode;
+
+        // 0. Noise blanker (raw IQ, before the mixer, as the JS).
+        iq = blank(iq, n);
 
         // 1. Shift the tuned signal to 0 Hz (planar output).
         ensureSize(a0, n);
@@ -752,6 +900,20 @@ struct Receiver::Impl {
             for (std::size_t i = 0; i < no; ++i) tap[t0 + i] = twoCh ? 0.5f * (o0[i] + o1[i]) : o0[i];
         }
 
+        // 6c. Audio clean-up filters (mono modes), then the retune mute and
+        //     the limiter (every mode).  The decoders' tap above is before
+        //     them, as in the JS.
+        if (no) {
+            if (!twoCh) audioFilters(&o0[0], no);
+            if (lim && lim->gating()) lim->gate(&o0[0], twoCh ? &o1[0] : 0, no);
+            const double v = clampd(cfg.volume, 0, 2);
+            if (cfg.limiter && v > 0) {
+                if (!lim) lim.reset(new Limiter(audioRate));
+                // Ceiling in terms of what is actually heard (signal x volume).
+                lim->process(&o0[0], twoCh ? &o1[0] : 0, no, static_cast<float>(0.95 / v));
+            }
+        }
+
         // 7. Squelch gate (5 ms ramp), volume, clip, interleave.
         const float vol = static_cast<float>(clampd(cfg.volume, 0, 2));
         const float target = sqOpen ? 1.0f : 0.0f, step = 1.0f / (0.005f * audioRate);
@@ -790,6 +952,12 @@ void Receiver::configure(const ReceiverConfig& c) {
     Impl& s = *impl_;
     const ReceiverConfig old = s.cfg;
     s.cfg = c;
+    if (c.offsetHz != old.offsetHz || c.sampleRate != old.sampleRate) s.filtersRetuned();
+    if (c.offsetHz != old.offsetHz || c.mode != old.mode) {
+        std::lock_guard<std::mutex> lock(s.filtMutex);  // (what the smart notch methods compare with)
+        s.snCurOffset = c.offsetHz;
+        s.snCurMode = c.mode;
+    }
     if (!s.built) return;  // first process() builds everything
     const bool rebuild = c.sampleRate != old.sampleRate || c.mode != old.mode ||
                          s.effectiveBandwidth() != s.bw ||
@@ -847,6 +1015,102 @@ void Receiver::resetRds() {
     s.rdsChanges = ~0u;
     std::lock_guard<std::mutex> lock(s.rdsMutex);
     s.rdsSnap = RdsInfo();
+}
+
+// ---- Smart notch (the JS's snFind, the strip's click/drag/right-click) -------
+double Receiver::smartNotchFind(int* mainsHumHz) {
+    Impl& s = *impl_;
+    if (mainsHumHz) *mainsHumHz = 0;
+    std::vector<float> x;
+    double fs;
+    {
+        std::lock_guard<std::mutex> lock(s.filtMutex);
+        SmartNotch& sn = s.smart();
+        fs = sn.sampleRate();
+        sn.recent(static_cast<std::size_t>(std::floor(fs * 3 + 0.5)), x);
+    }
+    int hum = 0;
+    const std::vector<SmartNotch::Whine> got = SmartNotch::find(x, fs, 0, &hum);  // (outside the lock)
+    if (got.empty()) {
+        if (mainsHumHz) *mainsHumHz = hum;
+        return 0;
+    }
+    const double f = got[0].f;
+    std::lock_guard<std::mutex> lock(s.filtMutex);
+    SmartNotch& sn = s.smart();
+    for (int i = 0; i < sn.count(); ++i)
+        if (std::fabs(sn.frequency(i) - f) < 25) return sn.frequency(i);  // already notched
+    sn.add(f);
+    s.snAddOffset = s.snCurOffset;
+    s.snAddMode = s.snCurMode;
+    return f;
+}
+
+std::vector<double> Receiver::smartNotches() const {
+    std::lock_guard<std::mutex> lock(impl_->filtMutex);
+    return impl_->sn ? impl_->sn->notches() : std::vector<double>();
+}
+
+int Receiver::smartNotchAdd(double hz, bool snap) {
+    Impl& s = *impl_;
+    if (snap) {
+        std::vector<float> x, avg;
+        double fs;
+        {
+            std::lock_guard<std::mutex> lock(s.filtMutex);
+            fs = s.smart().sampleRate();
+            s.smart().recent(8192, x);
+        }
+        const double bin = fs / 4096;
+        const int top = static_cast<int>(std::floor(5000 / bin + 0.5));
+        SmartNotch::quickSpectrum(x, fs, top + 8, avg);
+        hz = SmartNotch::snap(hz, avg, bin, top);
+    }
+    std::lock_guard<std::mutex> lock(s.filtMutex);
+    const int i = s.smart().add(hz);
+    s.snAddOffset = s.snCurOffset;
+    s.snAddMode = s.snCurMode;
+    return i;
+}
+
+void Receiver::smartNotchMove(int index, double hz) {
+    std::lock_guard<std::mutex> lock(impl_->filtMutex);
+    impl_->smart().move(index, hz);
+}
+
+void Receiver::smartNotchRemove(int index) {
+    std::lock_guard<std::mutex> lock(impl_->filtMutex);
+    impl_->smart().remove(index);
+}
+
+void Receiver::smartNotchClear() {
+    std::lock_guard<std::mutex> lock(impl_->filtMutex);
+    if (impl_->sn) impl_->sn->clear();
+}
+
+double Receiver::smartNotchSpectrum(std::vector<float>& db, double maxHz) const {
+    Impl& s = *impl_;
+    std::vector<float> x;
+    double fs;
+    {
+        std::lock_guard<std::mutex> lock(s.filtMutex);
+        fs = s.smart().sampleRate();
+        s.smart().recent(8192, x);
+    }
+    const double bin = fs / 4096;
+    return SmartNotch::quickSpectrum(x, fs, static_cast<int>(std::floor(maxHz / bin + 0.5)) + 1, db);
+}
+
+std::vector<double> Receiver::autoNotches() const {
+    std::lock_guard<std::mutex> lock(impl_->filtMutex);
+    return std::vector<double>(impl_->anfList, impl_->anfList + impl_->anfCount);
+}
+
+float Receiver::voiceProbability() const { return impl_->aiVad; }
+
+void Receiver::noiseBlankerStats(unsigned long long& blanked, unsigned long long& total) const {
+    blanked = impl_->nbBlanked;
+    total = impl_->nbTotal;
 }
 
 }  // namespace dsp

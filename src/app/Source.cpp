@@ -45,6 +45,8 @@
 #include "../decoders/Ais.h"
 #include "../decoders/AisEncoders.h"
 #include "../decoders/AviationEncoders.h"
+#include "../decoders/DabEncoders.h"
+#include "../decoders/DrmEncoders.h"
 #include "../decoders/Ax25Encoders.h"
 #include "../decoders/WsprEncoders.h"
 #include "../decoders/FskEncoders.h"
@@ -54,6 +56,7 @@
 #include "../decoders/PskEncoders.h"
 #include "../dsp/Receiver.h"
 #include "../rtlsdr/RtlSdr.h"
+#include "../sdrconnect/SdrConnect.h"
 
 namespace app {
 
@@ -315,6 +318,63 @@ private:
     double rate_, center_;
     unsigned tuner_ = 0;
     unsigned gains_;
+};
+
+// ---------------------------------------------------------- SdrConnectSource --
+
+// An SDRplay RSP through SDRconnect (liboffgrid-sdrconnect): the full IQ
+// stream, converted to the u8 samples every other source gives.
+class SdrConnectSource : public Source {
+public:
+    explicit SdrConnectSource(const std::string& address) : address_(address), rate_(2048000), center_(100e6) {
+        client_.setAutoReconnect(true);
+    }
+    ~SdrConnectSource() { stop(); }
+    bool start(std::string& error) {
+        if (!client_.connect(address_, error)) {
+            error = "SDRconnect: " + error + " (is SDRconnect running there with its WebSocket API on?)";
+            return false;
+        }
+        client_.setSampleRate(rate_);
+        client_.setFrequency(center_);
+        if (!client_.startDevice(error)) return false;
+        SampleQueue* q = &queue_;
+        std::vector<std::uint8_t>* buf = &u8_;
+        return client_.startIq([q, buf](const std::complex<float>* iq, std::size_t n) {
+            buf->resize(n * 2);
+            sdrc::Client::toU8(iq, n, &(*buf)[0]);
+            q->push(&(*buf)[0], buf->size());
+        }, error);
+    }
+    void stop() {
+        client_.stop();
+        client_.disconnect();
+    }
+    std::string name() const { return "SDRconnect " + (client_.device().empty() ? address_ : client_.device()); }
+    double sampleRate() const { return rate_; }
+    bool setSampleRate(double hz) {
+        rate_ = hz;
+        queue_.clear();
+        return client_.setSampleRate(hz);
+    }
+    double centerFrequency() const { return center_; }
+    bool setCenterFrequency(double hz) {
+        center_ = hz;
+        queue_.clear();
+        return client_.setFrequency(hz);
+    }
+    bool setGain(double dB) { return dB < 0 ? client_.setGainAuto() : client_.setGainFraction(dB / 49.6); }
+    std::vector<double> gains() const {
+        std::vector<double> g;
+        for (int i = 0; i <= 31; ++i) g.push_back(i * 49.6 / 31);
+        return g;
+    }
+
+private:
+    std::string address_;
+    sdrc::Client client_;
+    double rate_, center_;
+    std::vector<std::uint8_t> u8_;  // conversion buffer (client thread only)
 };
 
 // ---------------------------------------------- paced sources (file, demo) --
@@ -592,6 +652,18 @@ void addDecoderStations(dsp::DemoSource& demo) {
         }
         demo.addAudioStation(14080000, air4, fr, -46, dsp::Mode::USB, "FT4", t0);
     }
+    // DRM on 25 m (11.700 MHz "OFFgrid DRM", AAC with text, a slide and
+    // Journaline; 11.750 MHz "OFFgrid xHE", xHE-AAC: no sound yet): the
+    // browser version's demo loops, 48 kS/s IQ with DRM's k=0 at 0 Hz.
+    for (int which = 0; which < 2; ++which) {
+        std::vector<std::complex<float> > iq;
+        if (!dec::drmSignal(dec::drmDemoStation(which), iq) || iq.empty()) continue;
+        dsp::DemoSource::Burst b;
+        b.at = 0;
+        b.iq.assign(iq.begin(), iq.end());
+        demo.addBurstStation(dec::drmDemoStationHz(which), std::vector<dsp::DemoSource::Burst>(1, b), 48000,
+                             iq.size() / 48000.0, -30, which ? "DRM xHE" : "DRM");
+    }
     // Time stations, locked to the computer's clock: their code starts at
     // `now` and every (re)build plays the sample for the present moment
     // (5 minutes, then the code repeats and no longer matches the clock).
@@ -608,7 +680,7 @@ void addDecoderStations(dsp::DemoSource& demo) {
 
 class DemoSourceImpl : public PacedSource {
 public:
-    DemoSourceImpl(double rate, double center) : PacedSource(rate, center), demo_(rate, center) {}
+    DemoSourceImpl(double rate, double center) : PacedSource(rate, center), demo_(rate, center), stickHz_(center), dabPhase_(0) {}
     ~DemoSourceImpl() { stopThread(); }
     bool start(std::string&) {
         // Built now, just before the first sample: the time stations' code
@@ -623,21 +695,57 @@ protected:
     void produce(std::size_t samples, std::vector<std::uint8_t>& bytes) {
         std::lock_guard<std::mutex> lock(mutex_);
         demo_.generate(samples, bytes);
+        addDab(samples, bytes);
     }
     void centerChanged(double hz) {
         std::lock_guard<std::mutex> lock(mutex_);
         demo_.setCenter(hz);
+        stickHz_ = hz;
     }
 
 private:
+    // DAB: the browser version's demo multiplex ("OFFgrid DAB": a DAB+ and
+    // an MP2 station, text, slides, logos) on 12A, 223.936 MHz.  Made only
+    // while the stick is near it (it is 1.5 MHz wide, made on the fly at
+    // 2.048 MS/s, about 2 % of a core), mixed in at the stick's offset.
+    static double dabHz() { return 223936e3; }
+    void addDab(std::size_t samples, std::vector<std::uint8_t>& bytes) {
+        const double off = dabHz() - stickHz_;
+        if (sampleRate() != dec::DabDemoMultiplex::sampleRate() || std::fabs(off) > 300e3) {
+            dabPhase_ = 0;
+            return;
+        }
+        if (!dab_) dab_.reset(new dec::DabDemoMultiplex());
+        dabBuf_.resize(samples);
+        dab_->generate(&dabBuf_[0], samples);
+        const double step = 2 * 3.14159265358979 * off / sampleRate(), amp = 0.12 * 127.5;
+        for (std::size_t i = 0; i < samples && 2 * i + 1 < bytes.size(); ++i) {
+            const std::complex<float> v = dabBuf_[i] * std::complex<float>(static_cast<float>(std::cos(dabPhase_)),
+                                                                            static_cast<float>(std::sin(dabPhase_)));
+            dabPhase_ += step;
+            if (dabPhase_ > 3.14159265358979) dabPhase_ -= 2 * 3.14159265358979;
+            if (dabPhase_ < -3.14159265358979) dabPhase_ += 2 * 3.14159265358979;
+            const double re = bytes[2 * i] + amp * v.real(), im = bytes[2 * i + 1] + amp * v.imag();
+            bytes[2 * i] = static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, re + 0.5)));
+            bytes[2 * i + 1] = static_cast<std::uint8_t>(std::max(0.0, std::min(255.0, im + 0.5)));
+        }
+    }
+
     std::mutex mutex_;
     dsp::DemoSource demo_;
+    double stickHz_;
+    std::unique_ptr<dec::DabDemoMultiplex> dab_;
+    std::vector<std::complex<float> > dabBuf_;
+    double dabPhase_;
 };
 
 }  // namespace
 
 std::unique_ptr<Source> makeRtlSource(int index) { return std::unique_ptr<Source>(new RtlSource(index)); }
 std::unique_ptr<Source> makeTcpSource(const std::string& hostPort) { return std::unique_ptr<Source>(new TcpSource(hostPort)); }
+std::unique_ptr<Source> makeSdrConnectSource(const std::string& hostPort) {
+    return std::unique_ptr<Source>(new SdrConnectSource(hostPort));
+}
 std::unique_ptr<Source> makeFileSource(const std::string& path, double rate, double center) {
     return std::unique_ptr<Source>(new FileSource(path, rate, center));
 }

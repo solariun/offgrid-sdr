@@ -24,6 +24,8 @@
 #include "Ais.h"
 #include "Ax25.h"
 #include "Cw.h"
+#include "Dab.h"
+#include "Drm.h"
 #include "Fax.h"
 #include "Ft8.h"
 #include "Hell.h"
@@ -39,8 +41,8 @@ namespace dec {
 
 namespace {
 const char* const kNames[] = {"CW", "RTTY", "PSK", "NAVTEX", "DSC", "HELL", "FAX", "SSTV", "TIME", "AX25",
-                              "ACARS", "VDL2", "AIS", "FT8", "FT4", "WSPR"};
-const int kCount = 16;
+                              "ACARS", "VDL2", "AIS", "FT8", "FT4", "WSPR", "DAB", "DRM"};
+const int kCount = 18;
 }  // namespace
 
 const char* kindName(Kind kind) {
@@ -56,6 +58,7 @@ bool parseKind(const std::string& name, Kind& kind) {
     if (up == "AX.25" || up == "APRS" || up == "PACKET") up = "AX25";
     if (up == "WEFAX" || up == "RADIOFAX") up = "FAX";
     if (up == "VDL" || up == "VDLM2") up = "VDL2";
+    if (up == "DAB+" || up == "DABPLUS") up = "DAB";
     for (int i = 0; i < kCount; ++i) {
         if (up == kNames[i]) {
             kind = static_cast<Kind>(i);
@@ -89,6 +92,8 @@ std::unique_ptr<Decoder> makeDecoder(Kind kind) {
         case Kind::Ais: return std::unique_ptr<Decoder>(new AisDecoder());
         case Kind::Ft8: return std::unique_ptr<Decoder>(new Ft8Decoder());
         case Kind::Ft4: return std::unique_ptr<Decoder>(new Ft4Decoder());
+        case Kind::Dab: return std::unique_ptr<Decoder>(new DabDecoder());
+        case Kind::Drm: return std::unique_ptr<Decoder>(new DrmDecoder());
     }
     return std::unique_ptr<Decoder>();
 }

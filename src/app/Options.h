@@ -20,7 +20,7 @@
 
 namespace app {
 
-enum class SourceKind { Rtl, Tcp, File, Demo };
+enum class SourceKind { Rtl, Tcp, File, Demo, SdrConnect };
 
 struct Options {
     Options();
@@ -28,6 +28,7 @@ struct Options {
     SourceKind source;
     int device;              // --device N (RTL-SDR index)
     std::string tcp;         // --tcp host[:port]
+    std::string sdrconnect;  // --sdrconnect host[:port] (SDRplay RSP via SDRconnect)
     std::string file;        // --file path.cu8
     double fileCenter;       // --center Hz (file's centre frequency)
     double sampleRate;       // --rate Hz
@@ -47,6 +48,9 @@ struct Options {
     std::string decoder;     // --decoder cw|rtty|psk|navtex|dsc|hell
     bool fresh;              // --fresh: ignore the saved settings
     std::string locator;     // --locator GRID (e.g. JO21): distances and bearings
+    double upconverter;      // --upconverter HZ (e.g. 125M): HF converter's LO (0 = none)
+    std::string backup;      // --backup FILE: copy the settings there and exit
+    std::string restore;     // --restore FILE: settings from FILE, then start
 };
 
 // Parses argv into opts.  Returns "" or an error message.

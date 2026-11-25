@@ -25,6 +25,9 @@
 //    VDL2              IQ: the stick's span covers 136.6-137 MHz (dial 136.8)
 //    AIS               IQ: both channels (dial 162.000, between them)
 //    FT8, FT4, WSPR    USB, 3 kHz, the dial on the listed frequency
+//    DAB               the stick centred on the channel (2.048 MS/s): the
+//                      1.536 MHz ensemble must fit; sound from the decoder
+//    DRM               AM, the dial on the DRM centre; sound from the decoder
 //  The interface (Ui) and the headless mode (main) both use it.
 // ============================================================================
 #ifndef OFFGRID_APP_DECODERPLAN_H
@@ -42,6 +45,7 @@ struct DecoderPlan {
     double bandwidth;   // 0 = the mode's default
     double shift;       // Hz the receiver sits below the dial
     std::function<void(dec::Decoder&)> setup;  // decoder settings (may be empty)
+    bool centerOnDial;  // the stick centred exactly on the dial (DAB)
 };
 
 DecoderPlan planDecoder(dec::Kind kind, double hz);

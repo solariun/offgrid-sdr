@@ -32,9 +32,10 @@ Options::Options()
       help(false),
       version(false),
       headlessSeconds(0),
-      fresh(false) {}
+      fresh(false),
+      upconverter(0) {}
 
-const char* versionString() { return "offgrid 0.1.0 (C++11 terminal port of OFFgrid-SDR 2.5)"; }
+const char* versionString() { return "offgrid 0.5.0 (C++11 terminal port of OFFgrid-SDR 2.5)"; }
 
 std::string parse(int argc, char** argv, Options& o) {
     bool freqGiven = false;
@@ -53,6 +54,10 @@ std::string parse(int argc, char** argv, Options& o) {
         } else if (a == "--tcp" && hasValue) {
             o.source = SourceKind::Tcp;
             o.tcp = v;
+            ++i;
+        } else if (a == "--sdrconnect" && hasValue) {
+            o.source = SourceKind::SdrConnect;
+            o.sdrconnect = v;
             ++i;
         } else if (a == "--file" && hasValue) {
             o.source = SourceKind::File;
@@ -114,11 +119,20 @@ std::string parse(int argc, char** argv, Options& o) {
             ++i;
         } else if (a == "--decoder" && hasValue) {
             dec::Kind k;
-            if (!dec::parseKind(v, k)) return "--decoder: one of cw, rtty, psk, navtex, dsc, hell";
+            if (!dec::parseKind(v, k)) return "--decoder: cw, rtty, psk, navtex, dsc, hell, fax, sstv, time, ax25, acars, vdl2, ais, ft8, ft4, wspr, dab, drm";
             o.decoder = v;
             ++i;
         } else if (a == "--locator" && hasValue) {
             o.locator = v;
+            ++i;
+        } else if (a == "--upconverter" && hasValue) {
+            if (!parseFrequency(v, o.upconverter)) return "--upconverter: a frequency, e.g. 125M";
+            ++i;
+        } else if (a == "--backup" && hasValue) {
+            o.backup = v;
+            ++i;
+        } else if (a == "--restore" && hasValue) {
+            o.restore = v;
             ++i;
         } else if (a == "--fresh") {
             o.fresh = true;
@@ -147,6 +161,7 @@ std::string usage() {
            "  --list                  list the RTL-SDR sticks and exit\n"
            "  --device N              use stick N (from --list)\n"
            "  --tcp HOST[:PORT]       an rtl_tcp server (port 1234 by default)\n"
+           "  --sdrconnect HOST[:PORT]  an SDRplay RSP through SDRconnect (port 5454 by default)\n"
            "  --file PATH             raw unsigned 8-bit IQ (rtl_sdr output), looped\n"
            "  --center FREQ           the recording's centre frequency (with --file)\n"
            "  --demo                  simulated stations, no hardware needed\n"
@@ -179,9 +194,14 @@ std::string usage() {
            "Other\n"
            "  --headless SECONDS      no interface: print the signal, RDS and status each second\n"
            "  --wav FILE              record the sound to a WAV file (also R in the interface)\n"
-           "  --decoder NAME          start a decoder: cw, rtty, psk, navtex, dsc, hell (d in the\n"
-           "                          interface); with --headless the text is printed\n"
+           "  --decoder NAME          start a decoder (d in the interface): cw, rtty, psk, navtex,\n"
+           "                          dsc, hell, fax, sstv, time, ax25, acars, vdl2, ais, ft8, ft4,\n"
+           "                          wspr, dab, drm; with --headless the text is printed\n"
            "  --fresh                 ignore the saved settings (~/.config/offgrid/settings.ini)\n"
+           "  --upconverter FREQ      an HF upconverter's oscillator (e.g. 125M): below 65 MHz the\n"
+           "                          stick is tuned at frequency + FREQ (kept)\n"
+           "  --backup FILE           copy the settings (memories, labels, clock...) to FILE and exit\n"
+           "  --restore FILE          take the settings from FILE (made by --backup), then start\n"
            "  --locator GRID          your Maidenhead locator (e.g. JO21): distances and bearings for\n"
            "                          FT8/FT4/WSPR, the Heard list, AIS and APRS (kept)\n"
            "  -V, --version           version\n"

@@ -18,6 +18,7 @@
 #include "Bands.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -105,6 +106,34 @@ const Band* bandAt(double hz) {
         if (!best || b[i].high - b[i].low < best->high - best->low) best = &b[i];
     }
     return best;
+}
+
+const std::vector<DabChannel>& dabChannels() {
+    static const DabChannel table[] = {
+        {"5A", 174928e3},  {"5B", 176640e3},  {"5C", 178352e3},  {"5D", 180064e3},  {"6A", 181936e3},  {"6B", 183648e3},
+        {"6C", 185360e3},  {"6D", 187072e3},  {"7A", 188928e3},  {"7B", 190640e3},  {"7C", 192352e3},  {"7D", 194064e3},
+        {"8A", 195936e3},  {"8B", 197648e3},  {"8C", 199360e3},  {"8D", 201072e3},  {"9A", 202928e3},  {"9B", 204640e3},
+        {"9C", 206352e3},  {"9D", 208064e3},  {"10A", 209936e3}, {"10N", 210096e3}, {"10B", 211648e3}, {"10C", 213360e3},
+        {"10D", 215072e3}, {"11A", 216928e3}, {"11N", 217088e3}, {"11B", 218640e3}, {"11C", 220352e3}, {"11D", 222064e3},
+        {"12A", 223936e3}, {"12N", 224096e3}, {"12B", 225648e3}, {"12C", 227360e3}, {"12D", 229072e3}, {"13A", 230784e3},
+        {"13B", 232496e3}, {"13C", 234208e3}, {"13D", 235776e3}, {"13E", 237488e3}, {"13F", 239200e3}};
+    static const std::vector<DabChannel> v(table, table + sizeof(table) / sizeof(table[0]));
+    return v;
+}
+
+const DabChannel* dabChannelAt(double hz) {
+    const std::vector<DabChannel>& c = dabChannels();
+    for (size_t i = 0; i < c.size(); ++i)
+        if (std::fabs(c[i].hz - hz) < 1000) return &c[i];
+    return 0;
+}
+
+const DabChannel& dabNearest(double hz) {
+    const std::vector<DabChannel>& c = dabChannels();
+    size_t best = 0;
+    for (size_t i = 1; i < c.size(); ++i)
+        if (std::fabs(c[i].hz - hz) < std::fabs(c[best].hz - hz)) best = i;
+    return c[best];
 }
 
 std::string formatFrequency(double hz) {

@@ -89,6 +89,8 @@ protected:
 // Factories.
 std::unique_ptr<Source> makeRtlSource(int index);  // index into RtlSdr::find()
 std::unique_ptr<Source> makeTcpSource(const std::string& hostPort);
+// An SDRplay RSP through SDRplay's SDRconnect (WebSocket API, port 5454).
+std::unique_ptr<Source> makeSdrConnectSource(const std::string& hostPort);
 std::unique_ptr<Source> makeFileSource(const std::string& path, double sampleRate, double centerHz);
 std::unique_ptr<Source> makeDemoSource(double sampleRate, double centerHz);
 

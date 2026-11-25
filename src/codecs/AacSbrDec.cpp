@@ -1,0 +1,632 @@
+// ============================================================================
+//  offgrid-codecs - SBR decoder (part of OFFgrid-SDR TUI,
+//  https://github.com/solariun/offgrid-sdr).
+//  SPDX-License-Identifier: GPL-3.0-or-later
+//  Ported to C++11 from FAAD2 (GPL-2.0-or-later, commit a335040, as built by
+//  OFFgrid-SDR: see licenses/FAAD2). FAAD2's own notice, kept below, applies
+//  to the code taken from it; "Code from FAAD2 is copyright (c) Nero AG".
+// ----------------------------------------------------------------------------
+//  File:   src/codecs/AacSbrDec.cpp
+//  Layer:  Library liboffgrid-codecs (internal: the FAAD2 port)
+//
+//  What this file does
+//  -------------------
+//  Spectral band replication per channel and frame: QMF analysis, HF
+//  generation and adjustment, QMF synthesis (with PS for HE-AAC v2 and DRM).
+//
+//  How it fits in
+//  --------------
+//  Part of the AAC decoder behind codec::AacDecoder (Aac.h): a faithful port
+//  of FAAD2 restricted to what DAB+ and DRM need (AAC-LC with 960/1024-sample
+//  frames, SBR, PS, DRM's error-resilient AAC). Everything lives in namespace
+//  codec::faad; nothing here is meant to be used directly.
+//
+//  Contributing
+//  ------------
+//  Keep it close to FAAD2 (names, structure, arithmetic order): the tests
+//  compare its output sample-exactly with the original. Strict C++11, no
+//  warnings with -Wall -Wextra -pedantic-errors.
+// ============================================================================
+
+/*
+** FAAD2 - Freeware Advanced Audio (AAC) Decoder including SBR decoding
+** Copyright (C) 2003-2005 M. Bakker, Nero AG, http://www.nero.com
+**
+** This program is free software; you can redistribute it and/or modify
+** it under the terms of the GNU General Public License as published by
+** the Free Software Foundation; either version 2 of the License, or
+** (at your option) any later version.
+**
+** This program is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+** GNU General Public License for more details.
+**
+** You should have received a copy of the GNU General Public License
+** along with this program; if not, write to the Free Software
+** Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+**
+** Any non-GPL usage of this software or parts of this software is strictly
+** forbidden.
+**
+** The "appropriate copyright message" mentioned in section 2c of the GPLv2
+** must read: "Code from FAAD2 is copyright (c) Nero AG, www.nero.com"
+**
+** Commercial non-GPL licensing of this software is possible.
+** For more info contact Nero AG through Mpeg4AAClicense@nero.com.
+**
+** $Id: sbr_dec.c,v 1.44 2009/01/26 22:32:31 menno Exp $
+**/
+
+#include <cstdlib>
+#include "AacCommon.h"
+#include "AacStructs.h"
+#include "AacSyntax.h"
+#include "AacBits.h"
+#include "AacSbrSyntax.h"
+#include "AacSbrQmf.h"
+#include "AacSbrHfgen.h"
+#include "AacSbrHfadj.h"
+
+namespace codec {
+namespace faad {
+
+/* static function declarations */
+static uint8_t sbr_save_prev_data(sbr_info *sbr, uint8_t ch);
+static void sbr_save_matrix(sbr_info *sbr, uint8_t ch);
+
+#define INVALID ((uint8_t)-1)
+
+sbr_info *sbrDecodeInit(uint16_t framelength, uint8_t id_aac,
+                        uint32_t sample_rate, uint8_t downSampledSBR
+						, uint8_t IsDRM
+                        )
+{
+    sbr_info *sbr = (sbr_info*)faad_malloc(sizeof(sbr_info));
+    memset(sbr, 0, sizeof(sbr_info));
+
+    /* save id of the parent element */
+    sbr->id_aac = id_aac;
+    sbr->sample_rate = sample_rate;
+
+    sbr->bs_freq_scale = 2;
+    sbr->bs_alter_scale = 1;
+    sbr->bs_noise_bands = 2;
+    sbr->bs_limiter_bands = 2;
+    sbr->bs_limiter_gains = 2;
+    sbr->bs_interpol_freq = 1;
+    sbr->bs_smoothing_mode = 1;
+    sbr->bs_start_freq = 5;
+    sbr->bs_amp_res = 1;
+    sbr->bs_samplerate_mode = 1;
+    sbr->prevEnvIsShort[0] = -1;
+    sbr->prevEnvIsShort[1] = -1;
+    sbr->header_count = 0;
+    sbr->Reset = 1;
+
+    sbr->Is_DRM_SBR = IsDRM;
+    sbr->tHFGen = T_HFGEN;
+    sbr->tHFAdj = T_HFADJ;
+
+    sbr->bsco = 0;
+    sbr->bsco_prev = 0;
+    sbr->M_prev = 0;
+    sbr->frame_len = framelength;
+
+    /* force sbr reset */
+    sbr->bs_start_freq_prev = INVALID;
+
+    if (framelength == 960)
+    {
+        sbr->numTimeSlotsRate = RATE * NO_TIME_SLOTS_960;
+        sbr->numTimeSlots = NO_TIME_SLOTS_960;
+    }
+    else if (framelength == 1024)
+    {
+        sbr->numTimeSlotsRate = RATE * NO_TIME_SLOTS;
+        sbr->numTimeSlots = NO_TIME_SLOTS;
+    }
+    else
+    {
+        faad_free(sbr);
+        return NULL;
+    }
+
+    sbr->GQ_ringbuf_index[0] = 0;
+    sbr->GQ_ringbuf_index[1] = 0;
+
+    if (id_aac == ID_CPE)
+    {
+        /* stereo */
+        uint8_t j;
+        sbr->qmfa[0] = qmfa_init(32);
+        sbr->qmfa[1] = qmfa_init(32);
+        sbr->qmfs[0] = qmfs_init((downSampledSBR)?32:64);
+        sbr->qmfs[1] = qmfs_init((downSampledSBR)?32:64);
+
+        for (j = 0; j < 5; j++)
+        {
+            sbr->G_temp_prev[0][j] = (real_t*)faad_malloc(64*sizeof(real_t));
+            sbr->G_temp_prev[1][j] = (real_t*)faad_malloc(64*sizeof(real_t));
+            sbr->Q_temp_prev[0][j] = (real_t*)faad_malloc(64*sizeof(real_t));
+            sbr->Q_temp_prev[1][j] = (real_t*)faad_malloc(64*sizeof(real_t));
+        }
+
+        memset(sbr->Xsbr[0], 0, (sbr->numTimeSlotsRate+sbr->tHFGen)*64 * sizeof(qmf_t));
+        memset(sbr->Xsbr[1], 0, (sbr->numTimeSlotsRate+sbr->tHFGen)*64 * sizeof(qmf_t));
+    } else {
+        /* mono */
+        uint8_t j;
+        sbr->qmfa[0] = qmfa_init(32);
+        sbr->qmfs[0] = qmfs_init((downSampledSBR)?32:64);
+        sbr->qmfs[1] = NULL;
+
+        for (j = 0; j < 5; j++)
+        {
+            sbr->G_temp_prev[0][j] = (real_t*)faad_malloc(64*sizeof(real_t));
+            sbr->Q_temp_prev[0][j] = (real_t*)faad_malloc(64*sizeof(real_t));
+        }
+
+        memset(sbr->Xsbr[0], 0, (sbr->numTimeSlotsRate+sbr->tHFGen)*64 * sizeof(qmf_t));
+    }
+
+    return sbr;
+}
+
+void sbrDecodeEnd(sbr_info *sbr)
+{
+    uint8_t j;
+
+    if (sbr)
+    {
+        qmfa_end(sbr->qmfa[0]);
+        qmfs_end(sbr->qmfs[0]);
+        if (sbr->qmfs[1] != NULL)
+        {
+            qmfa_end(sbr->qmfa[1]);
+            qmfs_end(sbr->qmfs[1]);
+        }
+
+        for (j = 0; j < 5; j++)
+        {
+            if (sbr->G_temp_prev[0][j]) faad_free(sbr->G_temp_prev[0][j]);
+            if (sbr->Q_temp_prev[0][j]) faad_free(sbr->Q_temp_prev[0][j]);
+            if (sbr->G_temp_prev[1][j]) faad_free(sbr->G_temp_prev[1][j]);
+            if (sbr->Q_temp_prev[1][j]) faad_free(sbr->Q_temp_prev[1][j]);
+        }
+
+        if (sbr->ps != NULL)
+            ps_free(sbr->ps);
+
+        if (sbr->drm_ps != NULL)
+            drm_ps_free(sbr->drm_ps);
+
+        faad_free(sbr);
+    }
+}
+
+void sbrReset(sbr_info *sbr)
+{
+    uint8_t j;
+    if (sbr->qmfa[0] != NULL)
+        memset(sbr->qmfa[0]->x, 0, 2 * sbr->qmfa[0]->channels * 10 * sizeof(real_t));
+    if (sbr->qmfa[1] != NULL)
+        memset(sbr->qmfa[1]->x, 0, 2 * sbr->qmfa[1]->channels * 10 * sizeof(real_t));
+    if (sbr->qmfs[0] != NULL)
+        memset(sbr->qmfs[0]->v, 0, 2 * sbr->qmfs[0]->channels * 20 * sizeof(real_t));
+    if (sbr->qmfs[1] != NULL)
+        memset(sbr->qmfs[1]->v, 0, 2 * sbr->qmfs[1]->channels * 20 * sizeof(real_t));
+
+    for (j = 0; j < 5; j++)
+    {
+        if (sbr->G_temp_prev[0][j] != NULL)
+            memset(sbr->G_temp_prev[0][j], 0, 64*sizeof(real_t));
+        if (sbr->G_temp_prev[1][j] != NULL)
+            memset(sbr->G_temp_prev[1][j], 0, 64*sizeof(real_t));
+        if (sbr->Q_temp_prev[0][j] != NULL)
+            memset(sbr->Q_temp_prev[0][j], 0, 64*sizeof(real_t));
+        if (sbr->Q_temp_prev[1][j] != NULL)
+            memset(sbr->Q_temp_prev[1][j], 0, 64*sizeof(real_t));
+    }
+
+    memset(sbr->Xsbr[0], 0, (sbr->numTimeSlotsRate+sbr->tHFGen)*64 * sizeof(qmf_t));
+    memset(sbr->Xsbr[1], 0, (sbr->numTimeSlotsRate+sbr->tHFGen)*64 * sizeof(qmf_t));
+
+    sbr->GQ_ringbuf_index[0] = 0;
+    sbr->GQ_ringbuf_index[1] = 0;
+    sbr->header_count = 0;
+    sbr->Reset = 1;
+
+    sbr->L_E_prev[0] = 0;
+    sbr->L_E_prev[1] = 0;
+    sbr->bs_freq_scale = 2;
+    sbr->bs_alter_scale = 1;
+    sbr->bs_noise_bands = 2;
+    sbr->bs_limiter_bands = 2;
+    sbr->bs_limiter_gains = 2;
+    sbr->bs_interpol_freq = 1;
+    sbr->bs_smoothing_mode = 1;
+    sbr->bs_start_freq = 5;
+    sbr->bs_amp_res = 1;
+    sbr->bs_samplerate_mode = 1;
+    sbr->prevEnvIsShort[0] = -1;
+    sbr->prevEnvIsShort[1] = -1;
+    sbr->bsco = 0;
+    sbr->bsco_prev = 0;
+    sbr->M_prev = 0;
+    sbr->bs_start_freq_prev = INVALID;
+
+    sbr->f_prev[0] = 0;
+    sbr->f_prev[1] = 0;
+    for (j = 0; j < MAX_M; j++)
+    {
+        sbr->E_prev[0][j] = 0;
+        sbr->Q_prev[0][j] = 0;
+        sbr->E_prev[1][j] = 0;
+        sbr->Q_prev[1][j] = 0;
+        sbr->bs_add_harmonic_prev[0][j] = 0;
+        sbr->bs_add_harmonic_prev[1][j] = 0;
+    }
+    sbr->bs_add_harmonic_flag_prev[0] = 0;
+    sbr->bs_add_harmonic_flag_prev[1] = 0;
+}
+
+static uint8_t sbr_save_prev_data(sbr_info *sbr, uint8_t ch)
+{
+    uint8_t i;
+
+    /* save data for next frame */
+    sbr->kx_prev = sbr->kx;
+    sbr->M_prev = sbr->M;
+    sbr->bsco_prev = sbr->bsco;
+
+    sbr->L_E_prev[ch] = sbr->L_E[ch];
+
+    /* sbr->L_E[ch] can become 0 on files with bit errors */
+    if (sbr->L_E[ch] <= 0)
+        return 19;
+
+    sbr->f_prev[ch] = sbr->f[ch][sbr->L_E[ch] - 1];
+    for (i = 0; i < MAX_M; i++)
+    {
+        sbr->E_prev[ch][i] = sbr->E[ch][i][sbr->L_E[ch] - 1];
+        sbr->Q_prev[ch][i] = sbr->Q[ch][i][sbr->L_Q[ch] - 1];
+    }
+
+    for (i = 0; i < MAX_M; i++)
+    {
+        sbr->bs_add_harmonic_prev[ch][i] = sbr->bs_add_harmonic[ch][i];
+    }
+    sbr->bs_add_harmonic_flag_prev[ch] = sbr->bs_add_harmonic_flag[ch];
+
+    if (sbr->l_A[ch] == sbr->L_E[ch])
+        sbr->prevEnvIsShort[ch] = 0;
+    else
+        sbr->prevEnvIsShort[ch] = -1;
+
+    return 0;
+}
+
+static void sbr_save_matrix(sbr_info *sbr, uint8_t ch)
+{
+    uint8_t i;
+
+    for (i = 0; i < sbr->tHFGen; i++)
+    {
+        memmove(sbr->Xsbr[ch][i], sbr->Xsbr[ch][i+sbr->numTimeSlotsRate], 64 * sizeof(qmf_t));
+    }
+    for (i = sbr->tHFGen; i < MAX_NTSRHFG; i++)
+    {
+        memset(sbr->Xsbr[ch][i], 0, 64 * sizeof(qmf_t));
+    }
+}
+
+static uint8_t sbr_process_channel(sbr_info *sbr, real_t *channel_buf, qmf_t X[MAX_NTSR][64],
+                                   uint8_t ch, uint8_t dont_process,
+                                   const uint8_t downSampledSBR)
+{
+    int16_t k, l;
+    uint8_t ret = 0;
+    (void)downSampledSBR;  /* TODO: remove parameter? */
+
+
+    if (sbr->Is_DRM_SBR)
+    {
+        sbr->bsco = (uint8_t)FAAD_MAX((int32_t)sbr->maxAACLine*32/(int32_t)sbr->frame_len - (int32_t)sbr->kx, 0);
+    } else {
+        sbr->bsco = 0;
+    }
+
+
+//#define PRE_QMF_PRINT
+
+
+    /* subband analysis */
+    if (dont_process)
+        sbr_qmf_analysis_32(sbr, sbr->qmfa[ch], channel_buf, sbr->Xsbr[ch], sbr->tHFGen, 32);
+    else
+        sbr_qmf_analysis_32(sbr, sbr->qmfa[ch], channel_buf, sbr->Xsbr[ch], sbr->tHFGen, sbr->kx);
+
+    if (!dont_process)
+    {
+        /* insert high frequencies here */
+        /* hf generation using patching */
+        hf_generation(sbr, sbr->Xsbr[ch], sbr->Xsbr[ch]
+            ,ch);
+
+
+        /* hf adjustment */
+        ret = hf_adjustment(sbr, sbr->Xsbr[ch]
+            ,ch);
+        if (ret > 0)
+        {
+            dont_process = 1;
+        }
+    }
+
+    if ((sbr->just_seeked != 0) || dont_process)
+    {
+        for (l = 0; l < sbr->numTimeSlotsRate; l++)
+        {
+            for (k = 0; k < 32; k++)
+            {
+                QMF_RE(X[l][k]) = QMF_RE(sbr->Xsbr[ch][l + sbr->tHFAdj][k]);
+                QMF_IM(X[l][k]) = QMF_IM(sbr->Xsbr[ch][l + sbr->tHFAdj][k]);
+            }
+            for (k = 32; k < 64; k++)
+            {
+                QMF_RE(X[l][k]) = 0;
+                QMF_IM(X[l][k]) = 0;
+            }
+        }
+    } else {
+        for (l = 0; l < sbr->numTimeSlotsRate; l++)
+        {
+            uint8_t kx_band, M_band, bsco_band;
+
+            if (l < sbr->t_E[ch][0])
+            {
+                kx_band = sbr->kx_prev;
+                M_band = sbr->M_prev;
+                bsco_band = sbr->bsco_prev;
+            } else {
+                kx_band = sbr->kx;
+                M_band = sbr->M;
+                bsco_band = sbr->bsco;
+            }
+
+            for (k = 0; k < kx_band + bsco_band; k++)
+            {
+                QMF_RE(X[l][k]) = QMF_RE(sbr->Xsbr[ch][l + sbr->tHFAdj][k]);
+                QMF_IM(X[l][k]) = QMF_IM(sbr->Xsbr[ch][l + sbr->tHFAdj][k]);
+            }
+            for (k = kx_band + bsco_band; k < kx_band + M_band; k++)
+            {
+                QMF_RE(X[l][k]) = QMF_RE(sbr->Xsbr[ch][l + sbr->tHFAdj][k]);
+                QMF_IM(X[l][k]) = QMF_IM(sbr->Xsbr[ch][l + sbr->tHFAdj][k]);
+            }
+            for (k = FAAD_MAX(kx_band + bsco_band, kx_band + M_band); k < 64; k++)
+            {
+                QMF_RE(X[l][k]) = 0;
+                QMF_IM(X[l][k]) = 0;
+            }
+        }
+    }
+
+    return ret;
+}
+
+uint8_t sbrDecodeCoupleFrame(sbr_info *sbr, real_t *left_chan, real_t *right_chan,
+                             const uint8_t just_seeked, const uint8_t downSampledSBR)
+{
+    uint8_t dont_process = 0;
+    uint8_t ret = 0;
+    qmf_t X[MAX_NTSRHFG][64];
+
+    if (sbr == NULL)
+        return 20;
+
+    /* case can occur due to bit errors */
+    if (sbr->id_aac != ID_CPE)
+        return 21;
+
+    if (sbr->ret || (sbr->header_count == 0))
+    {
+        /* don't process just upsample */
+        dont_process = 1;
+
+        /* Re-activate reset for next frame */
+        if (sbr->ret && sbr->Reset)
+            sbr->bs_start_freq_prev = INVALID;
+    }
+
+    if (just_seeked)
+    {
+        sbr->just_seeked = 1;
+    } else {
+        sbr->just_seeked = 0;
+    }
+
+    sbr->ret += sbr_process_channel(sbr, left_chan, X, 0, dont_process, downSampledSBR);
+    /* subband synthesis */
+    if (downSampledSBR)
+    {
+        sbr_qmf_synthesis_32(sbr, sbr->qmfs[0], X, left_chan);
+    } else {
+        sbr_qmf_synthesis_64(sbr, sbr->qmfs[0], X, left_chan);
+    }
+
+    sbr->ret += sbr_process_channel(sbr, right_chan, X, 1, dont_process, downSampledSBR);
+    /* subband synthesis */
+    if (downSampledSBR)
+    {
+        sbr_qmf_synthesis_32(sbr, sbr->qmfs[1], X, right_chan);
+    } else {
+        sbr_qmf_synthesis_64(sbr, sbr->qmfs[1], X, right_chan);
+    }
+
+    if (sbr->bs_header_flag)
+        sbr->just_seeked = 0;
+
+    if (sbr->header_count != 0 && sbr->ret == 0)
+    {
+        ret = sbr_save_prev_data(sbr, 0);
+        if (ret) return ret;
+        ret = sbr_save_prev_data(sbr, 1);
+        if (ret) return ret;
+    }
+
+    sbr_save_matrix(sbr, 0);
+    sbr_save_matrix(sbr, 1);
+
+    sbr->frame++;
+
+//#define POST_QMF_PRINT
+
+    return 0;
+}
+
+uint8_t sbrDecodeSingleFrame(sbr_info *sbr, real_t *channel,
+                             const uint8_t just_seeked, const uint8_t downSampledSBR)
+{
+    uint8_t dont_process = 0;
+    uint8_t ret = 0;
+    qmf_t X[MAX_NTSRHFG][64];
+
+    if (sbr == NULL)
+        return 20;
+
+    /* case can occur due to bit errors */
+    if (sbr->id_aac != ID_SCE && sbr->id_aac != ID_LFE)
+        return 21;
+
+    if (sbr->ret || (sbr->header_count == 0))
+    {
+        /* don't process just upsample */
+        dont_process = 1;
+
+        /* Re-activate reset for next frame */
+        if (sbr->ret && sbr->Reset)
+            sbr->bs_start_freq_prev = INVALID;
+    }
+
+    if (just_seeked)
+    {
+        sbr->just_seeked = 1;
+    } else {
+        sbr->just_seeked = 0;
+    }
+
+    sbr->ret += sbr_process_channel(sbr, channel, X, 0, dont_process, downSampledSBR);
+    /* subband synthesis */
+    if (downSampledSBR)
+    {
+        sbr_qmf_synthesis_32(sbr, sbr->qmfs[0], X, channel);
+    } else {
+        sbr_qmf_synthesis_64(sbr, sbr->qmfs[0], X, channel);
+    }
+
+    if (sbr->bs_header_flag)
+        sbr->just_seeked = 0;
+
+    if (sbr->header_count != 0 && sbr->ret == 0)
+    {
+        ret = sbr_save_prev_data(sbr, 0);
+        if (ret) return ret;
+    }
+
+    sbr_save_matrix(sbr, 0);
+
+    sbr->frame++;
+
+//#define POST_QMF_PRINT
+
+    return 0;
+}
+
+uint8_t sbrDecodeSingleFramePS(sbr_info *sbr, real_t *left_channel, real_t *right_channel,
+                               const uint8_t just_seeked, const uint8_t downSampledSBR)
+{
+    uint8_t l, k;
+    uint8_t dont_process = 0;
+    uint8_t ret = 0;
+    qmf_t X_left[MAX_NTSRHFG][64] = {{{0}}};
+    qmf_t X_right[MAX_NTSRHFG][64] = {{{0}}}; /* must set this to 0 */
+
+    if (sbr == NULL)
+        return 20;
+
+    /* case can occur due to bit errors */
+    if (sbr->id_aac != ID_SCE && sbr->id_aac != ID_LFE)
+        return 21;
+
+    if (sbr->ret || (sbr->header_count == 0))
+    {
+        /* don't process just upsample */
+        dont_process = 1;
+
+        /* Re-activate reset for next frame */
+        if (sbr->ret && sbr->Reset)
+            sbr->bs_start_freq_prev = INVALID;
+    }
+
+    if (just_seeked)
+    {
+        sbr->just_seeked = 1;
+    } else {
+        sbr->just_seeked = 0;
+    }
+
+    if (sbr->qmfs[1] == NULL)
+    {
+        sbr->qmfs[1] = qmfs_init((downSampledSBR)?32:64);
+    }
+
+    sbr->ret += sbr_process_channel(sbr, left_channel, X_left, 0, dont_process, downSampledSBR);
+
+    /* copy some extra data for PS */
+    for (l = sbr->numTimeSlotsRate; l < sbr->numTimeSlotsRate + 6; l++)
+    {
+        for (k = 0; k < 5; k++)
+        {
+            QMF_RE(X_left[l][k]) = QMF_RE(sbr->Xsbr[0][sbr->tHFAdj+l][k]);
+            QMF_IM(X_left[l][k]) = QMF_IM(sbr->Xsbr[0][sbr->tHFAdj+l][k]);
+        }
+    }
+
+    /* perform parametric stereo */
+    if (sbr->Is_DRM_SBR)
+    {
+        drm_ps_decode(sbr->drm_ps, (sbr->ret > 0), X_left, X_right);
+    } else {
+        ps_decode(sbr->ps, X_left, X_right);
+    }
+
+    /* subband synthesis */
+    if (downSampledSBR)
+    {
+        sbr_qmf_synthesis_32(sbr, sbr->qmfs[0], X_left, left_channel);
+        sbr_qmf_synthesis_32(sbr, sbr->qmfs[1], X_right, right_channel);
+    } else {
+        sbr_qmf_synthesis_64(sbr, sbr->qmfs[0], X_left, left_channel);
+        sbr_qmf_synthesis_64(sbr, sbr->qmfs[1], X_right, right_channel);
+    }
+
+    if (sbr->bs_header_flag)
+        sbr->just_seeked = 0;
+
+    if (sbr->header_count != 0 && sbr->ret == 0)
+    {
+        ret = sbr_save_prev_data(sbr, 0);
+        if (ret) return ret;
+    }
+
+    sbr_save_matrix(sbr, 0);
+
+    sbr->frame++;
+
+    return 0;
+}
+
+} // namespace faad
+} // namespace codec

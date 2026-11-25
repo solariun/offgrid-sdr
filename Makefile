@@ -26,7 +26,7 @@ GRAPHICX ?= external/Graphicx
 STATIC   ?= 1
 PREFIX   ?= /usr/local
 CXXFLAGS ?= -O2
-CXXFLAGS += -std=c++11 -Wall -Wextra -Wpedantic -MMD -MP -Isrc -I$(GRAPHICX)/include -pthread
+CXXFLAGS += -std=c++11 -Wall -Wextra -Wpedantic -MMD -MP -Isrc -I$(GRAPHICX)/include -isystem $(GRAPHICX)/third_party -pthread
 
 UNAME := $(shell uname -s)
 ifeq ($(UNAME),Darwin)
@@ -48,15 +48,19 @@ RTLSDR_SRCS   := $(wildcard src/usb/*.cpp) $(wildcard src/rtlsdr/*.cpp)
 DSP_SRCS      := $(wildcard src/dsp/*.cpp)
 DECODERS_SRCS := $(wildcard src/decoders/*.cpp) $(wildcard src/decoders/ax25/*.cpp)
 AUDIO_SRCS    := $(wildcard src/audio/*.cpp)
+SDRC_SRCS     := $(wildcard src/sdrconnect/*.cpp)
+CODECS_SRCS   := $(wildcard src/codecs/*.cpp)
 APP_SRCS      := $(wildcard src/app/*.cpp)
-GFX_SRCS      := $(addprefix $(GRAPHICX)/src/,graphicx.cpp terminal.cpp color.cpp canvas.cpp ui.cpp widgets.cpp png.cpp)
+GFX_SRCS      := $(addprefix $(GRAPHICX)/src/,graphicx.cpp terminal.cpp color.cpp canvas.cpp ui.cpp widgets.cpp png.cpp image_io.cpp)
 
 LIB_RTLSDR   := build/lib/liboffgrid-rtlsdr.a
 LIB_DSP      := build/lib/liboffgrid-dsp.a
 LIB_DECODERS := build/lib/liboffgrid-decoders.a
 LIB_AUDIO    := build/lib/liboffgrid-audio.a
+LIB_SDRC     := build/lib/liboffgrid-sdrconnect.a
+LIB_CODECS   := build/lib/liboffgrid-codecs.a
 LIB_GFX      := build/lib/libgraphicx.a
-LIBS         := $(LIB_RTLSDR) $(LIB_DSP) $(LIB_DECODERS) $(LIB_AUDIO)
+LIBS         := $(LIB_RTLSDR) $(LIB_DSP) $(LIB_DECODERS) $(LIB_CODECS) $(LIB_AUDIO) $(LIB_SDRC)
 
 TESTS    := $(patsubst tests/%.cpp,bin/%,$(wildcard tests/test_*.cpp))
 EXAMPLES := $(patsubst examples/%.cpp,bin/example-%,$(wildcard examples/*.cpp))
@@ -71,14 +75,17 @@ $(LIB_RTLSDR): $(call obj,$(RTLSDR_SRCS))
 $(LIB_DSP): $(call obj,$(DSP_SRCS))
 $(LIB_DECODERS): $(call obj,$(DECODERS_SRCS))
 $(LIB_AUDIO): $(call obj,$(AUDIO_SRCS))
+$(LIB_SDRC): $(call obj,$(SDRC_SRCS))
+$(LIB_CODECS): $(call obj,$(CODECS_SRCS))
 $(LIB_GFX): $(call obj,$(GFX_SRCS))
 build/lib/%.a:
 	@mkdir -p $(dir $@)
 	rm -f $@
 	ar rcs $@ $^
 
-# Link order: users before what they use (decoders need dsp's FFT).
-bin/offgrid: $(call obj,$(APP_SRCS)) $(LIB_DECODERS) $(LIB_DSP) $(LIB_RTLSDR) $(LIB_AUDIO) $(LIB_GFX)
+# Link order: users before what they use (decoders need dsp's FFT and the
+# codecs: DAB+ and DRM AAC, DAB MP2).
+bin/offgrid: $(call obj,$(APP_SRCS)) $(LIB_DECODERS) $(LIB_CODECS) $(LIB_DSP) $(LIB_RTLSDR) $(LIB_SDRC) $(LIB_AUDIO) $(LIB_GFX)
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(SYSLIBS) -o $@
 
@@ -86,7 +93,7 @@ examples: $(EXAMPLES)
 
 bin/example-%: build/examples/%.o $(LIBS)
 	@mkdir -p bin
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< $(LIB_DECODERS) $(LIB_DSP) $(LIB_RTLSDR) $(LIB_AUDIO) $(SYSLIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) $< $(LIB_DECODERS) $(LIB_CODECS) $(LIB_DSP) $(LIB_RTLSDR) $(LIB_AUDIO) $(SYSLIBS) -o $@
 
 tools: bin/rtl-probe
 
@@ -94,7 +101,7 @@ bin/rtl-probe: build/tools/rtl-probe.o $(LIB_RTLSDR)
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(SYSLIBS) -o $@
 
-bin/test_%: build/tests/test_%.o $(LIB_DECODERS) $(LIB_DSP)
+bin/test_%: build/tests/test_%.o $(LIB_DECODERS) $(LIB_CODECS) $(LIB_DSP) $(LIB_SDRC)
 	@mkdir -p bin
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ $(SYSLIBS) -o $@
 
@@ -112,7 +119,7 @@ build/%.o: %.cpp
 install: $(LIBS)
 	mkdir -p $(PREFIX)/lib $(PREFIX)/include/offgrid
 	cp $(LIBS) $(PREFIX)/lib/
-	for d in usb rtlsdr dsp decoders audio; do \
+	for d in usb rtlsdr dsp decoders codecs audio sdrconnect; do \
 	  mkdir -p $(PREFIX)/include/offgrid/$$d; cp src/$$d/*.h $(PREFIX)/include/offgrid/$$d/; done
 
 check-static: bin/offgrid

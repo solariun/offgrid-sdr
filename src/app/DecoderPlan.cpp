@@ -22,6 +22,7 @@ DecoderPlan planDecoder(dec::Kind kind, double hz) {
     p.mode = dsp::Mode::USB;
     p.bandwidth = 3000;
     p.shift = 0;
+    p.centerOnDial = false;
     switch (kind) {
         case dec::Kind::Cw:
             p.mode = dsp::Mode::CW;
@@ -66,6 +67,15 @@ DecoderPlan planDecoder(dec::Kind kind, double hz) {
         case dec::Kind::Ft8:
         case dec::Kind::Ft4:
         case dec::Kind::Wspr: break;  // USB, 3 kHz, the dial on the listed frequency
+        case dec::Kind::Dab:
+            p.mode = dsp::Mode::WFM;
+            p.bandwidth = 0;
+            p.centerOnDial = true;
+            break;
+        case dec::Kind::Drm:
+            p.mode = dsp::Mode::AM;
+            p.bandwidth = 20000;
+            break;
         case dec::Kind::Ax25: {
             const bool vhf = hz > 30e6;
             if (vhf) {

@@ -1,0 +1,389 @@
+// ============================================================================
+//  offgrid-codecs - decoder structures (part of OFFgrid-SDR TUI,
+//  https://github.com/solariun/offgrid-sdr).
+//  SPDX-License-Identifier: GPL-3.0-or-later
+//  Ported to C++11 from FAAD2 (GPL-2.0-or-later, commit a335040, as built by
+//  OFFgrid-SDR: see licenses/FAAD2). FAAD2's own notice, kept below, applies
+//  to the code taken from it; "Code from FAAD2 is copyright (c) Nero AG".
+// ----------------------------------------------------------------------------
+//  File:   src/codecs/AacStructs.h
+//  Layer:  Library liboffgrid-codecs (internal: the FAAD2 port)
+//
+//  What this file does
+//  -------------------
+//  The decoder's data structures: ICS, elements, the decoder state.
+//
+//  How it fits in
+//  --------------
+//  Part of the AAC decoder behind codec::AacDecoder (Aac.h): a faithful port
+//  of FAAD2 restricted to what DAB+ and DRM need (AAC-LC with 960/1024-sample
+//  frames, SBR, PS, DRM's error-resilient AAC). Everything lives in namespace
+//  codec::faad; nothing here is meant to be used directly.
+//
+//  Contributing
+//  ------------
+//  Keep it close to FAAD2 (names, structure, arithmetic order): the tests
+//  compare its output sample-exactly with the original. Strict C++11, no
+//  warnings with -Wall -Wextra -pedantic-errors.
+// ============================================================================
+
+/*
+** FAAD2 - Freeware Advanced Audio (AAC) Decoder including SBR decoding
+** Copyright (C) 2003-2005 M. Bakker, Nero AG, http://www.nero.com
+**
+** This program is free software; you can redistribute it and/or modify
+** it under the terms of the GNU General Public License as published by
+** the Free Software Foundation; either version 2 of the License, or
+** (at your option) any later version.
+**
+** This program is distributed in the hope that it will be useful,
+** but WITHOUT ANY WARRANTY; without even the implied warranty of
+** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+** GNU General Public License for more details.
+**
+** You should have received a copy of the GNU General Public License
+** along with this program; if not, write to the Free Software
+** Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+**
+** Any non-GPL usage of this software or parts of this software is strictly
+** forbidden.
+**
+** The "appropriate copyright message" mentioned in section 2c of the GPLv2
+** must read: "Code from FAAD2 is copyright (c) Nero AG, www.nero.com"
+**
+** Commercial non-GPL licensing of this software is possible.
+** For more info contact Nero AG through Mpeg4AAClicense@nero.com.
+**
+** $Id: structs.h,v 1.49 2009/01/26 23:51:15 menno Exp $
+**/
+
+#ifndef OFFGRID_CODECS_AACSTRUCTS_H
+#define OFFGRID_CODECS_AACSTRUCTS_H
+
+#include "AacCommon.h"
+#include "AacCfft.h"
+#include "AacSbrDec.h"
+
+namespace codec {
+namespace faad {
+
+#define MAX_CHANNELS        64
+#define MAX_SYNTAX_ELEMENTS 48
+#define MAX_WINDOW_GROUPS    8
+#define MAX_SFB             51
+#define MAX_LTP_SFB         40
+#define MAX_LTP_SFB_S        8
+
+/* used to save the prediction state */
+typedef struct {
+    int16_t r[2];
+    int16_t COR[2];
+    int16_t VAR[2];
+} pred_state;
+
+typedef struct {
+    uint16_t N;
+    cfft_info *cfft;
+    complex_t *sincos;
+} mdct_info;
+
+typedef struct
+{
+    const real_t *long_window[2];
+    const real_t *short_window[2];
+
+    mdct_info *mdct256;
+    mdct_info *mdct2048;
+} fb_info;
+
+typedef struct
+{
+    uint8_t present;
+
+    uint8_t num_bands;
+    uint8_t pce_instance_tag;
+    uint8_t excluded_chns_present;
+    uint8_t band_top[17];
+    uint8_t prog_ref_level;
+    uint8_t dyn_rng_sgn[17];
+    uint8_t dyn_rng_ctl[17];
+    uint8_t exclude_mask[MAX_CHANNELS];
+    uint8_t additional_excluded_chns[MAX_CHANNELS];
+
+    real_t ctrl1;
+    real_t ctrl2;
+
+    /* OFFgrid-SDR: set when this frame carried dynamic range info (see raw_data_block in AacSyntax.cpp) */
+    uint8_t seen;
+} drc_info;
+
+typedef struct
+{
+    uint8_t element_instance_tag;
+    uint8_t object_type;
+    uint8_t sf_index;
+    uint8_t num_front_channel_elements;
+    uint8_t num_side_channel_elements;
+    uint8_t num_back_channel_elements;
+    uint8_t num_lfe_channel_elements;
+    uint8_t num_assoc_data_elements;
+    uint8_t num_valid_cc_elements;
+    uint8_t mono_mixdown_present;
+    uint8_t mono_mixdown_element_number;
+    uint8_t stereo_mixdown_present;
+    uint8_t stereo_mixdown_element_number;
+    uint8_t matrix_mixdown_idx_present;
+    uint8_t pseudo_surround_enable;
+    uint8_t matrix_mixdown_idx;
+    uint8_t front_element_is_cpe[16];
+    uint8_t front_element_tag_select[16];
+    uint8_t side_element_is_cpe[16];
+    uint8_t side_element_tag_select[16];
+    uint8_t back_element_is_cpe[16];
+    uint8_t back_element_tag_select[16];
+    uint8_t lfe_element_tag_select[16];
+    uint8_t assoc_data_element_tag_select[16];
+    uint8_t cc_element_is_ind_sw[16];
+    uint8_t valid_cc_element_tag_select[16];
+
+    uint8_t channels;
+
+    uint8_t comment_field_bytes;
+    uint8_t comment_field_data[257];
+
+    /* extra added values */
+    uint8_t num_front_channels;
+    uint8_t num_side_channels;
+    uint8_t num_back_channels;
+    uint8_t num_lfe_channels;
+    uint8_t sce_channel[16];
+    uint8_t cpe_channel[16];
+} program_config;
+
+typedef struct
+{
+    uint16_t syncword;
+    uint8_t id;
+    uint8_t layer;
+    uint8_t protection_absent;
+    uint8_t profile;
+    uint8_t sf_index;
+    uint8_t private_bit;
+    uint8_t channel_configuration;
+    uint8_t original;
+    uint8_t home;
+    uint8_t emphasis;
+    uint8_t copyright_identification_bit;
+    uint8_t copyright_identification_start;
+    uint16_t aac_frame_length;
+    uint16_t adts_buffer_fullness;
+    uint16_t crc_check;
+    uint8_t no_raw_data_blocks_in_frame;
+
+    /* control param */
+    uint8_t old_format;
+} adts_header;
+
+typedef struct
+{
+    uint8_t copyright_id_present;
+    int8_t copyright_id[10];
+    uint8_t original_copy;
+    uint32_t bitrate;
+    uint32_t adif_buffer_fullness;
+    uint8_t num_program_config_elements;
+    uint8_t home;
+    uint8_t bitstream_type;
+
+    /* maximum of 16 PCEs */
+    program_config pce[16];
+} adif_header;
+
+
+typedef struct
+{
+    uint8_t number_pulse;
+    uint8_t pulse_start_sfb;
+    uint8_t pulse_offset[4];
+    uint8_t pulse_amp[4];
+} pulse_info;
+
+typedef struct
+{
+    uint8_t n_filt[8];
+    uint8_t coef_res[8];
+    uint8_t length[8][4];
+    uint8_t order[8][4];
+    uint8_t direction[8][4];
+    uint8_t coef_compress[8][4];
+    uint8_t coef[8][4][32];
+} tns_info;
+
+
+typedef struct
+{
+    uint8_t max_sfb;
+    uint8_t global_gain;
+
+    uint8_t num_swb;
+    uint8_t num_window_groups;
+    uint8_t num_windows;
+    uint8_t window_sequence;
+    uint8_t window_group_length[8];
+    uint8_t window_shape;
+    uint8_t scale_factor_grouping;
+    uint16_t sect_sfb_offset[8][15*8];
+    uint16_t swb_offset[52];
+    uint16_t swb_offset_max;
+
+    uint8_t sect_cb[8][15*8];
+    uint16_t sect_start[8][15*8];
+    uint16_t sect_end[8][15*8];
+    uint8_t sfb_cb[8][8*15];
+    uint8_t num_sec[8]; /* number of sections in a group */
+
+    int16_t scale_factors[8][51]; /* [0..255], except for noise and intensity */
+
+    uint8_t ms_mask_present;
+    uint8_t ms_used[MAX_WINDOW_GROUPS][MAX_SFB];
+
+    uint8_t noise_used;
+    uint8_t is_used;
+
+    uint8_t pulse_data_present;
+    uint8_t tns_data_present;
+    uint8_t gain_control_data_present;
+    uint8_t predictor_data_present;
+
+    pulse_info pul;
+    tns_info tns;
+
+    /* ER HCR data */
+    uint16_t length_of_reordered_spectral_data;
+    uint8_t length_of_longest_codeword;
+    /* ER RLVC data */
+    uint8_t sf_concealment;
+    uint16_t length_of_rvlc_sf;
+    uint16_t dpcm_noise_nrg;
+    uint8_t sf_escapes_present;
+    uint8_t length_of_rvlc_escapes;
+    uint16_t dpcm_noise_last_position;
+    uint8_t rev_global_gain;
+} ic_stream; /* individual channel stream */
+
+typedef struct
+{
+    uint8_t channel;
+    int16_t paired_channel;
+
+    uint8_t element_instance_tag;
+    uint8_t common_window;
+
+    ic_stream ics1;
+    ic_stream ics2;
+} element; /* syntax element (SCE, CPE, LFE) */
+
+#define MAX_ASC_BYTES 64
+typedef struct {
+    int inited;
+    int version, versionA;
+    int framelen_type;
+    int useSameStreamMux;
+    int allStreamsSameTimeFraming;
+    int numSubFrames;
+    int numPrograms;
+    int numLayers;
+    int otherDataPresent;
+    uint32_t otherDataLenBits;
+    uint32_t frameLength;
+    uint8_t ASC[MAX_ASC_BYTES];
+    uint32_t ASCbits;
+} latm_header;
+
+typedef struct
+{
+    uint8_t adts_header_present;
+    uint8_t adif_header_present;
+    uint8_t latm_header_present;
+    uint8_t sf_index;
+    uint8_t object_type;
+    uint8_t channelConfiguration;
+    uint8_t postSeekResetFlag;
+    uint8_t aacSectionDataResilienceFlag;
+    uint8_t aacScalefactorDataResilienceFlag;
+    uint8_t aacSpectralDataResilienceFlag;
+    uint16_t frameLength;
+
+    uint32_t frame;
+
+    uint32_t sample_buffer_size;
+
+    uint8_t downMatrix;
+    uint8_t upMatrix;
+    uint8_t first_syn_ele;
+    uint8_t has_lfe;
+    /* number of channels in current frame */
+    uint8_t fr_channels;
+    /* number of elements in current frame */
+    uint8_t fr_ch_ele;
+
+    /* element_output_channels:
+       determines the number of channels the element will output
+    */
+    uint8_t element_output_channels[MAX_SYNTAX_ELEMENTS];
+    /* element_alloced:
+       determines whether the data needed for the element is allocated or not
+    */
+    uint8_t element_alloced[MAX_SYNTAX_ELEMENTS];
+    /* sample_buffer_size:
+       (internal) output dara buffer size
+    */
+
+	latm_header latm_config;
+
+    /* output data buffer */
+    void *sample_buffer;
+
+    uint8_t window_shape_prev[MAX_CHANNELS];
+    fb_info *fb;
+    drc_info *drc;
+
+    real_t *time_out[MAX_CHANNELS];
+    real_t *fb_intermed[MAX_CHANNELS];
+
+    sbr_info *sbr[MAX_SYNTAX_ELEMENTS];
+
+
+    /* RNG states */
+    uint32_t rng1;
+    uint32_t rng2;
+
+    int8_t sbr_present_flag;
+    int8_t forceUpSampling;
+    /* OFFgrid-SDR: set when the configuration states there is no SBR (DAB+'s sbr_flag 0, explicit parameters): SBR fill
+       data is then skipped instead of switching implicit SBR on (see fill_element in AacSyntax.cpp) */
+    uint8_t sbr_signalled_absent;
+    int8_t downSampledSBR;
+    /* determines whether SBR data is allocated for the gives element */
+    uint8_t sbr_alloced[MAX_SYNTAX_ELEMENTS];
+
+    int8_t ps_present_flag;
+    uint8_t ps_used[MAX_SYNTAX_ELEMENTS];
+    uint8_t ps_used_global;
+
+    /* Program Config Element */
+    uint8_t pce_set;
+    program_config pce;
+    uint8_t element_id[MAX_CHANNELS];
+    uint8_t internal_channel[MAX_CHANNELS];
+
+    /* Configuration data */
+    NeAACDecConfiguration config;
+
+	const unsigned char *cmes;
+} NeAACDecStruct;
+
+} // namespace faad
+} // namespace codec
+
+#endif // OFFGRID_CODECS_AACSTRUCTS_H

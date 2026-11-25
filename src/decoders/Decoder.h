@@ -50,6 +50,8 @@
 //    AIS     IQ: both channels, 161.975 and 162.025 MHz (processIq)
 //    FT8/FT4 USB audio 200-3000 Hz, dial on the listed FT8/FT4 frequency
 //    WSPR    USB audio 1400-1600 Hz, dial on the listed WSPR dial frequency
+//    DAB     IQ at exactly 2.048 MS/s, the stick on the channel's centre (Dab.h)
+//    DRM     IQ (processIq), 48 kS/s up: the dial on the station's frequency (Drm.h)
 //    TIME    the carrier at 1000 Hz, found anywhere 700-1300 Hz (dial 1 kHz
 //            below the station; CHU's code needs audio to ~3.3 kHz; Time.h)
 //    AX25    packet/APRS: 1200 Bd AFSK 1200/2200 Hz in NFM audio, dial on the
@@ -73,7 +75,7 @@
 
 namespace dec {
 
-enum class Kind { Cw, Rtty, Psk, Navtex, Dsc, Hell, Fax, Sstv, Time, Ax25, Acars, Vdl2, Ais, Ft8, Ft4, Wspr };
+enum class Kind { Cw, Rtty, Psk, Navtex, Dsc, Hell, Fax, Sstv, Time, Ax25, Acars, Vdl2, Ais, Ft8, Ft4, Wspr, Dab, Drm };
 const char* kindName(Kind kind);  // "CW", "RTTY", "PSK", "NAVTEX", "DSC", "HELL", "FAX", "SSTV", "TIME"
 bool parseKind(const std::string& name, Kind& kind);  // case-insensitive
 
@@ -105,6 +107,18 @@ struct Status {
     double clockError;    // its uncertainty, seconds (e.g. 0.005)
     double stationTime;   // the station's time now, Unix seconds (UTC)
     std::string station;  // "CHU", "WWV", "WWVH", "RWM"
+};
+
+// A station / programme a multi-service decoder offers (DAB services in an
+// ensemble, DRM's up to four services).
+struct Service {
+    Service() : id(0), audio(true), bitrateKbps(0), selected(false) {}
+    unsigned id;            // service id (DAB SId, DRM service index)
+    std::string label;      // e.g. "NPO Radio 1"
+    std::string detail;     // e.g. "DAB+ 96 kbit/s HE-AAC v2 stereo", "Pop music"
+    bool audio;             // an audio service (else data)
+    int bitrateKbps;
+    bool selected;
 };
 
 // One line of a picture (FAX, SSTV).  `picture` counts the pictures since
@@ -141,6 +155,31 @@ public:
     // Picture decoders (FAX, SSTV): the lines received since the last call.
     virtual bool hasPicture() const { return false; }
     virtual void takeLines(std::vector<PictureLine>& lines) { (void)lines; }
+
+    // Audio decoders (DAB, DRM): the programme's sound, decoded, to be played
+    // instead of the receiver's own demodulated audio.  takeAudio appends
+    // interleaved stereo float frames at audioRate() (which may change).
+    virtual bool hasAudio() const { return false; }
+    virtual int audioRate() const { return 48000; }
+    virtual void takeAudio(std::vector<float>& stereo) { (void)stereo; }
+
+    // Multi-service decoders (DAB, DRM): the services on offer and which is
+    // played.  selectService() takes a Service::id.
+    virtual std::vector<Service> services() const { return std::vector<Service>(); }
+    virtual bool selectService(unsigned id) {
+        (void)id;
+        return false;
+    }
+
+    // Still pictures that arrive whole (DAB/DRM slideshow, station logos):
+    // encoded image files (JPEG / PNG) with a name, for the program to
+    // decode and show.  takeImages appends them.
+    struct EncodedImage {
+        std::string name;                 // e.g. "slide 12", "logo"
+        std::string mime;                 // "image/jpeg", "image/png"
+        std::vector<unsigned char> bytes;
+    };
+    virtual void takeImages(std::vector<EncodedImage>& images) { (void)images; }
 
     // Time decoders: the computer's clock (Unix seconds, UTC) at the first
     // sample of the next process() call.  Programs call it before every

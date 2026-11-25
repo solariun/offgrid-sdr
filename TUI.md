@@ -17,11 +17,11 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
  NESDR SMArt v5 (R820T)  2.048 MS/s  DSP 5%  audio CoreAudio 80 ms        F1 help  q quit
 ```
 
-## What it does (phases 1 to 4)
+## What it does
 
 | | |
 |---|---|
-| **Sources** | RTL-SDR sticks (R820T, R820T2, R828D, RTL-SDR Blog V4) through our own driver; `rtl_tcp` servers; raw IQ recordings (`.cu8`, rtl_sdr's output); a demo band with simulated stations |
+| **Sources** | RTL-SDR sticks (R820T, R820T2, R828D, RTL-SDR Blog V4) through our own driver; `rtl_tcp` servers; **SDRplay RSPs through SDRconnect** (`--sdrconnect host[:port]`); raw IQ recordings (`.cu8`, rtl_sdr's output); a demo band with simulated stations; an HF upconverter in front of the stick (`--upconverter 125M`) |
 | **Modes** | WFM with stereo and **RDS** (station name, programme type, radio text, clock), NFM, AM, SAM (synchronous AM), USB, LSB, CW |
 | **Display** | big frequency, mode buttons, status lights (stereo, RDS, squelch, overload, recording, mute), S-meter with peak hold and level history, spectrum (braille plot with the passband shaded), waterfall (half blocks, 9 colormaps), band list, controls, RDS line, status line |
 | **Controls** | tuning by step / typed frequency / mouse click, step sizes 1 Hz to 1 MHz, 41 bands, volume, mute, squelch, RF gain or auto, filter width, zoom x1-x32, waterfall floor and range (auto floor), stereo/mono, bias-tee, direct sampling, ppm correction |
@@ -32,7 +32,17 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
 | **Aviation** | ACARS (AM, 131.550 / 131.725 MHz …) and VDL2 (every channel 136.6–137 MHz at once): registrations, flights, labels, message text, aircraft countries |
 | **Ships** | AIS on both channels at once (dial 162.000 MHz): positions, names, call signs, destinations, ETAs, sizes; `!AIVDM` sentences |
 | **FT8, FT4, WSPR** | the weak-signal modes, by the corrected clock (their timings also keep the clock right): every message, caller's country, distance and bearing (`--locator`), WSPR power and the stick's frequency error; the **Heard** tab sums up who you hear, band by band |
-| **Mouse** | everything: a toolbar under the header for every action (Decoder ▾, Memory +, Label, Log, Scan, Scan mem, Calibrate, Record, Save picture, Set clock, Theme, Help, Quit), OK / Cancel in prompts, the tabs, lists, sliders and check boxes; click the frequency to type one, the wheel over it tunes; click on the spectrum or waterfall to tune; click the decoder panel's title to change decoder |
+| **DAB / DAB+** | digital radio in Band III: the ensemble, its stations (choose with **j / k** or a click), the sound (DAB+ HE-AAC and classic DAB MP2), the now-playing text, slideshow pictures and station logos; ← / → step the channels (5A … 13F) |
+| **DRM** | Digital Radio Mondiale on shortwave and medium wave: every mode and bandwidth, the station's name, language and programme, AAC sound, text messages, slideshow pictures, Journaline (xHE-AAC stations are named but not yet played) |
+| **AUTO** | **A** (or *AUTO*) listens about 2 s near the dial and says what the signal is (CW, RTTY, NAVTEX, DSC, PSK31, Hell, fax, SSTV, FT8, WWV, WSPR, DRM, AM, SSB voice to within a few Hz, NFM; DAB, airband, AIS, APRS, ACARS by frequency), then tunes, sets the mode and starts the decoder |
+| **Clean-up filters** | **F** (or *Filters ▾*): noise blanker (clicks, ignition), noise reduction (low / medium / high), hum filter (50 / 60 Hz), auto notch (whistles), the **AI voice cleaner** (RNNoise, light … full), limiter with a short mute after each retune; for AM, SAM, USB, LSB (blanker and hum also CW) |
+| **Signal Monitor** | **O** watches the signal you are on (up to 8 at once, measured all the time from the stick's samples): level, S/N, how often and how long it transmits ("every 10.0 s"), occupancy, fades, drift, optionally followed as it drifts; the *Monitor* tab lists them (Enter tunes, Del stops), *Monitor ▾* saves a CSV log |
+| **Spectrum extras** | *View ▾*: peak hold, averaging, **new-signal alerts** (a signal where there was none for 2 minutes is announced and marked "new") |
+| **Likely bands open** | the *Heard* tab starts with the HF bands probably open now (ham and broadcast), from your locator (*Setup*) and the time of day |
+| **Band survey** | *Survey*: FT8 on every band from 80 m to 10 m in turn, so the Heard tab shows which bands are open |
+| **Replay, IQ, snapshot** | *Replay* plays the last 20 s again (tune around in it); *Save IQ* writes them as a `.cu8` recording (`--file` plays it); *Snapshot* saves the spectrum and waterfall as a PNG |
+| **Backup** | `--backup FILE` / `--restore FILE`: the settings, memories, labels and clock in one file |
+| **Mouse** | everything: a toolbar under the header for every action (Decoder ▾, AUTO, Filters ▾, Monitor ▾, View ▾, Memory +, Label, Log, Scan, Scan mem, Calibrate, Record, Save picture, Set clock, Replay, Save IQ, Snapshot, Setup, Survey, Theme, Help, Quit; it wraps onto a second row in narrow windows), OK / Cancel in prompts, the tabs, lists, sliders and check boxes; click the frequency to type one, the wheel over it tunes; click on the spectrum or waterfall to tune; click the decoder panel's title to change decoder |
 | **Memories, labels, log** | named memories (frequency, mode, filter); your own labels drawn on the spectrum; a logbook (`logbook.csv`: UTC time, frequency, mode, level, SNR, station, notes) |
 | **Scan** | the current band in its channel steps, or the memories; stops on a signal, goes on 2 s after it ends |
 | **Calibration** | K on a station of known frequency (FM broadcast, a time signal): the stick's error in ppm is measured and corrected |
@@ -40,8 +50,8 @@ mouse-and-keyboard interface drawn with [Graphicx](https://github.com/solariun/G
 | **Recording** | the sound to a 16-bit stereo WAV (R key or `--wav`) |
 | **Themes** | amber (the browser version's default), orange, lime, green, cyan, vfd, blue, violet, rose, mono, light |
 
-Not yet ported (next phase): DAB/DAB+, DRM, AUTO mode, the waterfall
-replay, the Signal Monitor and SDRconnect (phase 5).
+Everything of the browser version is ported. Not yet: playing xHE-AAC (DRM's newest
+codec; such stations are named and their text and pictures shown).
 
 ### Decoders
 
@@ -56,7 +66,9 @@ Try them with no hardware: `bin/offgrid --demo -f 7.355M --decoder rtty` (also
 7.312M RTTY, 7.275M CW, 14.071M PSK31, 7.0425M PSK63, 518k NAVTEX, 8414.5k DSC,
 14.0635M Hell, 7.880M fax, 14.230M SSTV, 7.850M CHU and 10M WWV time signals,
 144.800M APRS, 131.55M ACARS, 136.8M VDL2, 162M AIS, 14.074M FT8, 14.080M FT4,
-14.0956M WSPR).
+14.0956M WSPR, 223.936M DAB (channel 12A: "OFFgrid DAB" with a DAB+ and a classic
+station), 11.7M DRM ("OFFgrid DRM" with sound, text, a picture and Journaline) and
+11.75M DRM xHE). Or tune anywhere and press **A**.
 
 Decoders run on a thread of their own, so a heavy decode (an FT8 or WSPR slot,
 up to about a second of work) never interrupts the sound or the display.
@@ -73,7 +85,8 @@ at 1200 Bd above 30 MHz, in USB at 300 Bd below.
 | `~/.config/offgrid/settings.ini` | the last frequency, mode, volume, theme, ppm …, the memories, the labels, each band's last frequency (plain text; written on exit) |
 | `~/.config/offgrid/logbook.csv` | the log, one line per entry, for any spreadsheet |
 | `~/.config/offgrid/clock.txt` | the clock correction, its source and history (the PC clock's drift) |
-| `offgrid-FAX-…png`, `offgrid-SSTV-…png`, `offgrid-…wav` | pictures and recordings, in the directory offgrid was started from |
+| `offgrid-FAX-…png`, `offgrid-SSTV-…png`, `offgrid-DAB-…png`, `offgrid-…wav` | pictures and recordings, in the directory offgrid was started from |
+| `offgrid-…cu8`, `offgrid-snapshot-…png`, `offgrid-monitor-…csv` | saved IQ (*Save IQ*), screen pictures (*Snapshot*), the Signal Monitor's log |
 
 `$XDG_CONFIG_HOME` moves them, and `OFFGRID_CONFIG=dir` overrides the directory.
 
@@ -138,7 +151,7 @@ bin/offgrid --headless 10 -f 94.0    # no interface: one status line per second
 | PgUp / PgDn | ±1 MHz |
 | Enter or f | type a frequency (`94.0`, `7074k`, `145.8M`, `1090 MHz`) |
 | 1 … 7, m | WFM, NFM, AM, SAM, USB, LSB, CW; next mode |
-| b | the side list: Bands, Memories, Log tabs (← → change tab, ↑ ↓ Enter) |
+| b | the side list: Bands, Memories, Log, Heard, Monitor tabs (← → change tab, ↑ ↓ Enter) |
 | Tab / Esc | move through the side controls / give the keys back to tuning |
 | + / -, space | volume, mute |
 | g / G, a | RF gain down / up, automatic gain |
@@ -155,6 +168,10 @@ bin/offgrid --headless 10 -f 94.0    # no interface: one status line per second
 | n / N | scan this band / the memories (Esc or any tuning key stops) |
 | K | calibrate on a station of known frequency |
 | T | set the clock from the time decoder's last full time code |
+| A | AUTO: find out what the signal near the dial is, and set everything for it |
+| F | the clean-up filters |
+| O, Del | watch this signal (Signal Monitor) / stop watching the selected one (Monitor tab) |
+| j / k | DAB, DRM: next / previous station; with DAB, ← / → step the channels |
 | F1, h, ? | help |
 | q | quit |
 
@@ -170,17 +187,19 @@ second and only changed cells are sent (about 0.5 MB/s at 160x46 in truecolor).
 
 ## Reusable libraries
 
-The program is four static libraries plus its interface; each library works on its
+The program is six static libraries plus its interface; each library works on its
 own (no dependency on the program, the terminal or each other, except that the
-decoders use the DSP library's FFT). `make libs` builds them, `make install
+decoders use the DSP library's FFT and the codecs). `make libs` builds them, `make install
 PREFIX=…` installs them with their headers, and each directory has a README:
 
 | Library | What it is |
 |---|---|
 | [`liboffgrid-rtlsdr`](src/rtlsdr/README.md) | the RTL-SDR driver (no libusb) |
-| [`liboffgrid-dsp`](src/dsp/README.md) | demodulators, RDS, spectrum, demo band |
-| [`liboffgrid-decoders`](src/decoders/README.md) | CW, RTTY, PSK, NAVTEX, DSC, Hell, weather fax, SSTV, time signals (+ clock correction), AX.25/APRS, ACARS, VDL2, AIS, FT8, FT4, WSPR, callsign/locator tools, the Heard list, and their signal generators |
+| [`liboffgrid-dsp`](src/dsp/README.md) | demodulators, RDS, spectrum, demo band, the clean-up filters and RNNoise voice cleaner, AUTO, the Signal Monitor, propagation guide, peak hold and alerts |
+| [`liboffgrid-decoders`](src/decoders/README.md) | CW, RTTY, PSK, NAVTEX, DSC, Hell, weather fax, SSTV, time signals (+ clock correction), AX.25/APRS, ACARS, VDL2, AIS, FT8, FT4, WSPR, DAB/DAB+, DRM, callsign/locator tools, the Heard list, and their signal generators |
+| [`liboffgrid-codecs`](src/codecs/README.md) | AAC (LC, HE-AAC, HE-AAC v2, DRM) and MPEG Layer II decoders, ports of FAAD2 and pl_mpeg |
 | [`liboffgrid-audio`](src/audio/README.md) | sound output (no sound libraries) |
+| [`liboffgrid-sdrconnect`](src/sdrconnect/README.md) | an SDRconnect client (WebSocket, own code) for SDRplay receivers |
 
 `make examples` builds two small programs that use them: `example-fm-radio` (an FM
 radio with RDS in ~100 lines: driver + DSP + audio) and `example-decode` (decode a
@@ -191,15 +210,20 @@ WAV file with any decoder).
 ```
 src/usb/      USB without libusb: UsbLinux.cpp (usbfs ioctls), UsbMac.cpp (IOKit)
 src/rtlsdr/   the RTL-SDR driver: Rtl2832u (demodulator chip), R82xx (tuners), RtlSdr (public class)
-src/dsp/      signal processing: FFT, filters, demodulators, RDS, spectrum, demo band
+src/dsp/      signal processing: FFT, filters, demodulators, RDS, spectrum, demo band; AudioFilters,
+              VoiceCleaner (RNNoise), AutoMode, SignalMonitor, Propagation, SpectrumTools
 src/decoders/ decoders: Cw, Rtty, Psk, Navtex (+DSC), Hell, Fax, Sstv, Time (+Clock), Ax25 (+APRS;
-              ax25/ = AX25Toolkit's modem, HDLC, frames); encoders for tests and the demo
+              ax25/ = AX25Toolkit's modem, HDLC, frames), Acars, Vdl2, Ais, Ft8/Ftx, Wspr, Dab, Drm;
+              encoders for tests and the demo
+src/codecs/   AAC (FAAD2 port) and MP2 (pl_mpeg port)
+src/sdrconnect/  WebSocket and the SDRconnect client
 src/audio/    sound out: AudioMac.cpp (AudioQueue), AudioLinux.cpp (ALSA ioctls / pipe)
 src/app/      the program: Source (stick, rtl_tcp, file, demo), Radio (engine), Ui, Store (settings, memories,
               labels, log), Bands, Options, main
 tools/        rtl-probe
 examples/     fm-radio.cpp, decode.cpp (the libraries on their own)
-tests/        test_dsp.cpp, test_decoders_{fsk,psk,picture,time,ax25}.cpp
+tests/        test_dsp, test_filters, test_analysis, test_codecs, test_sdrconnect,
+              test_decoders_{fsk,psk,picture,time,ax25,aviation,ais,ftx,wspr,dab,drm}
 external/Graphicx   the terminal graphics and widget library (git submodule)
 spec.md       the specification: requirements, design, decisions, evidence, open problems
 ```
@@ -211,4 +235,9 @@ like OFFgrid-SDR itself. It ports OFFgrid-SDR by diddy-boy (the RDS decoder, the
 SAM demodulator, the band plan, the look); the RTL-SDR driver follows
 [webrtlsdr](https://github.com/jtarrio/webrtlsdr) and
 [signals](https://github.com/jtarrio/signals) by Jacobo Tarrio (Apache-2.0),
-which follow librtlsdr (GPL-2.0-or-later). Graphicx is MIT.
+which follow librtlsdr (GPL-2.0-or-later). The AAC decoder ports
+[FAAD2](https://github.com/knik0/faad2) (GPL-2.0-or-later), the MP2 decoder
+[pl_mpeg](https://github.com/phoboslab/pl_mpeg) (MIT), the voice cleaner
+[RNNoise](https://github.com/xiph/rnnoise) (BSD-3-Clause), DRM follows
+[Dream](https://sourceforge.net/projects/drm/) (GPL-2.0-or-later); their notices are in
+`licenses/`. Graphicx is MIT.

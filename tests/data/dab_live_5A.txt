@@ -1,0 +1,111 @@
+# ============================================================================
+#  offgrid-decoders - reusable C++11 decoders for radio text and picture
+#  modes (part of OFFgrid-SDR TUI, https://github.com/solariun/offgrid-sdr).
+#  SPDX-License-Identifier: GPL-3.0-or-later
+# ----------------------------------------------------------------------------
+#  File:   tests/data/dab_live_5A.txt
+#  Layer:  Tests (Library liboffgrid-decoders), evidence
+#
+#  What this file does
+#  -------------------
+#  The record of a live check of dec::DabDecoder (src/decoders/Dab.h): a
+#  NESDR SMArt v5 (R820T) on the project's own driver (src/rtlsdr, src/usb),
+#  2.048 MS/s, gain 40 dB fixed, centred on channel 5A (174.928 MHz) in the
+#  Netherlands (Eindhoven region), 40 s, with selectService(8023) at 16 s.
+#  Lines: status every 4 s (frames, FIBs ok/read, DAB+ super frames ok/bad,
+#  Reed-Solomon bytes fixed, audio units with good / bad CRC), the decoder's
+#  text (ensemble, station list, station chosen, DLS) and the final list.
+#  Run 1 without liboffgrid-codecs (audio units only); run 2 the same with
+#  the codecs built in (HE-AAC v2 to PCM: seconds of sound and its rms at
+#  the end; Glow FM is 32 kHz, KempenFM 48 kHz).  Of the other
+#  channels tried (5C 6A 6B 7D 8A 11C 12C, at 30 and 42 dB) none locked
+#  here: a Band III scan with this antenna showed a block only on 5A.
+#
+#  How it fits in
+#  --------------
+#  Made with a scratch tool (not in the repository) that feeds the stick's
+#  IQ to processIq(); kept as evidence for the port.
+#
+#  Contributing
+#  ------------
+#  Add new live runs as new dab_live_*.txt files with the same header.
+# ============================================================================
+tuner R820T
+
+==== 5A 174.928 MHz, gain 40.0 dB, 40 s ====
+[ 0s] DAB: searching | frames 0 FIB 0/0 SF 0/0 RS 0 AU 0 bad 0 MP2 0 lost 0 gaps 0
+DAB ensemble EINDHOVEN-KEMPEN (8652)
+Station Glow FM (DAB+ 96 kbit/s, EEP 2-A)
+[ 4s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 95% · SNR 6 dB · Glow FM DAB+ 96 kbit/s | frames 41 FIB 445/492 SF 0/0 RS 0 AU 0 bad 0 MP2 0 lost 0 gaps 0
+Glow FM: Het ritme van de Brainport
+[ 8s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 6 dB · Glow FM DAB+ 96 kbit/s HE-AAC 32 kHz stereo | frames 83 FIB 949/996 SF 33/0 RS 16 AU 66 bad 0 MP2 0 lost 0 gaps 0
+[12s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 7 dB · Glow FM DAB+ 96 kbit/s HE-AAC 32 kHz stereo | frames 124 FIB 1439/1488 SF 66/0 RS 45 AU 132 bad 0 MP2 0 lost 0 gaps 0
+[selectService 8023] -> ok
+[16s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 6 dB · KempenFM DAB+ 96 kbit/s | frames 166 FIB 1939/1992 SF 99/0 RS 74 AU 198 bad 0 MP2 0 lost 0 gaps 0
+Station KempenFM (DAB+ 96 kbit/s, EEP 2-A)
+[20s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 6 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 208 FIB 2442/2496 SF 129/0 RS 95 AU 288 bad 0 MP2 0 lost 0 gaps 0
+KempenFM: Altijd Dichtbij!
+[24s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 6 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 249 FIB 2933/2988 SF 162/0 RS 114 AU 387 bad 0 MP2 0 lost 0 gaps 0
+[28s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 7 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 291 FIB 3436/3492 SF 195/0 RS 131 AU 486 bad 0 MP2 0 lost 0 gaps 0
+  8441  Glow FM           DAB+ 96 kbit/s, Pop Music
+  8023  KempenFM          DAB+ 96 kbit/s, Pop Music
+  863D  Omroep Best       DAB+ 96 kbit/s
+  80CA  Omroep Veldhoven  DAB+ 96 kbit/s, Pop Music
+  858B  RADIOS&B          DAB+ 96 kbit/s, Oldies Music
+  83E0  Radio Horizon     DAB+ 96 kbit/s, Pop Music
+  8B05  Rivierenland      DAB+ 96 kbit/s, Pop Music
+  8440  Studio040         DAB+ 96 kbit/s, Pop Music
+[32s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 98% · SNR 7 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 333 FIB 3651/3708 SF 229/0 RS 143 AU 588 bad 0 MP2 0 lost 0 gaps 0
+[36s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 7 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 374 FIB 3771/3828 SF 262/0 RS 159 AU 687 bad 0 MP2 0 lost 0 gaps 0
+[40s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 7 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 416 FIB 3891/3948 SF 295/0 RS 169 AU 786 bad 0 MP2 0 lost 0 gaps 0
+-- 5A: ensemble 'EINDHOVEN-KEMPEN' (8652), 8 services; samples 40.0 s, decoder CPU 0.95 s (2.4% of real time)
+   8441 Glow FM            DAB+ 96 kbit/s, Pop Music
+   8023 KempenFM           DAB+ 96 kbit/s HE-AAC 48 kHz stereo, Pop Music [playing]
+   863D Omroep Best        DAB+ 96 kbit/s
+   80CA Omroep Veldhoven   DAB+ 96 kbit/s, Pop Music
+   858B RADIOS&B           DAB+ 96 kbit/s, Oldies Music
+   83E0 Radio Horizon      DAB+ 96 kbit/s, Pop Music
+   8B05 Rivierenland       DAB+ 96 kbit/s, Pop Music
+   8440 Studio040          DAB+ 96 kbit/s, Pop Music
+   DLS: Altijd Dichtbij!
+
+# ---- run 2: with liboffgrid-codecs (sound) ----
+tuner R820T
+
+==== 5A 174.928 MHz, gain 40.0 dB, 40 s ====
+[ 0s] DAB: searching | frames 0 FIB 0/0 SF 0/0 RS 0 AU 0 bad 0 MP2 0 lost 0 gaps 0
+DAB ensemble EINDHOVEN-KEMPEN (8652)
+Station Glow FM (DAB+ 96 kbit/s, EEP 2-A)
+[ 4s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 89% · SNR 6 dB · Glow FM DAB+ 96 kbit/s | frames 41 FIB 363/492 SF 0/0 RS 0 AU 0 bad 0 MP2 0 lost 0 gaps 0
+Glow FM: Alex Warren - Emerald Eyes
+[ 8s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 98% · SNR 6 dB · Glow FM DAB+ 96 kbit/s HE-AAC 32 kHz stereo | frames 83 FIB 856/996 SF 33/0 RS 92 AU 66 bad 0 MP2 0 lost 0 gaps 0
+[12s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 6 dB · Glow FM DAB+ 96 kbit/s HE-AAC 32 kHz stereo | frames 124 FIB 1342/1488 SF 66/0 RS 191 AU 132 bad 0 MP2 0 lost 0 gaps 0
+[selectService 8023] -> ok
+[16s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 99% · SNR 6 dB · KempenFM DAB+ 96 kbit/s | frames 166 FIB 1841/1992 SF 99/0 RS 302 AU 198 bad 0 MP2 0 lost 0 gaps 0
+Station KempenFM (DAB+ 96 kbit/s, EEP 2-A)
+KempenFM: Altijd Dichtbij!
+[20s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 100% · SNR 6 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 208 FIB 2341/2496 SF 129/0 RS 389 AU 288 bad 0 MP2 0 lost 0 gaps 0
+[24s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 98% · SNR 5 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 249 FIB 2824/2988 SF 161/0 RS 549 AU 384 bad 0 MP2 0 lost 0 gaps 0
+[28s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 95% · SNR 6 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 291 FIB 3317/3492 SF 195/0 RS 739 AU 486 bad 0 MP2 0 lost 0 gaps 0
+  8441  Glow FM           DAB+ 96 kbit/s, Pop Music
+  8023  KempenFM          DAB+ 96 kbit/s, Pop Music
+  863D  Omroep Best       DAB+ 96 kbit/s
+  80CA  Omroep Veldhoven  DAB+ 96 kbit/s, Pop Music
+  858B  RADIOS&B          DAB+ 96 kbit/s, Oldies Music
+  83E0  Radio Horizon     DAB+ 96 kbit/s, Pop Music
+  8B05  Rivierenland      DAB+ 96 kbit/s, Pop Music
+  8440  Studio040         DAB+ 96 kbit/s, Pop Music
+[32s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 97% · SNR 6 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 333 FIB 3528/3708 SF 229/0 RS 970 AU 588 bad 0 MP2 0 lost 0 gaps 0
+[36s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 98% · SNR 5 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 374 FIB 3647/3828 SF 261/0 RS 1141 AU 684 bad 0 MP2 0 lost 0 gaps 0
+[40s] EINDHOVEN-KEMPEN (8652) · 8 stations · FIC 97% · SNR 6 dB · KempenFM DAB+ 96 kbit/s HE-AAC 48 kHz stereo | frames 416 FIB 3764/3948 SF 295/0 RS 1311 AU 786 bad 0 MP2 0 lost 0 gaps 0
+-- sound: 31.4 s of stereo at 48000 Hz, rms 0.270 (raw s16 stereo in dab_live_5A.s16)
+-- 5A: ensemble 'EINDHOVEN-KEMPEN' (8652), 8 services; samples 40.0 s, decoder CPU 0.70 s (1.7% of real time)
+   8441 Glow FM            DAB+ 96 kbit/s, Pop Music
+   8023 KempenFM           DAB+ 96 kbit/s HE-AAC 48 kHz stereo, Pop Music [playing]
+   863D Omroep Best        DAB+ 96 kbit/s
+   80CA Omroep Veldhoven   DAB+ 96 kbit/s, Pop Music
+   858B RADIOS&B           DAB+ 96 kbit/s, Oldies Music
+   83E0 Radio Horizon      DAB+ 96 kbit/s, Pop Music
+   8B05 Rivierenland       DAB+ 96 kbit/s, Pop Music
+   8440 Studio040          DAB+ 96 kbit/s, Pop Music
+   DLS: Altijd Dichtbij!

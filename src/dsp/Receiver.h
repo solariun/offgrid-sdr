@@ -17,6 +17,9 @@
 //    dsp::DemoSource        synthetic IQ with stations of every mode (no
 //                           hardware needed: --demo, and the tests).
 //    dsp::RdsInfo           what the RDS decoder found.
+//  ReceiverConfig also switches on OFFgrid-SDR's audio clean-up filters
+//  (noise blanker, noise reduction, hum filter, auto and smart notch, the
+//  AI voice cleaner, limiter: AudioFilters.h, VoiceCleaner.h).
 //
 //  How it fits in
 //  --------------
@@ -58,6 +61,26 @@ struct ReceiverConfig {
     double cwPitchHz;    // CW: tone of the received carrier (default 700)
     bool agc;            // automatic audio level for AM/SAM/SSB/CW (default true)
     double volume;       // 0..2 linear (default 1)
+
+    // ---- Audio clean-up filters (AudioFilters.h, VoiceCleaner.h): ports of
+    //      OFFgrid-SDR's.  All off by default (as the JS), and with all of
+    //      them off the output is exactly what it was without them.  Each
+    //      applies only in the modes the JS allows; in other modes it is
+    //      simply not run.  (The JS also limits them to the MW/LW/SW/general
+    //      coverage bands: which band is the application's business.)
+    bool noiseBlanker;              // impulse noise, on the raw IQ (AM, SAM, USB, LSB, CW)
+    double noiseBlankerThresholdDb; // Addition to the JS: + blanks less, - more (0 = the JS's thresholds)
+    bool noiseReduction;            // spectral hiss reduction (AM, SAM, USB, LSB)
+    int noiseReductionLevel;        // 1 Low, 2 Medium (default), 3 High
+    int humFilterHz;                // mains hum notches: 0 (off), 50 or 60 (AM, SAM, USB, LSB, CW)
+    bool autoNotch;                 // automatic whistle notches (AM, SAM, USB, LSB)
+    bool smartNotch;                // the smart notch's list (smartNotch*() below) (AM, SAM, USB, LSB)
+    bool voiceCleaner;              // the AI voice cleaner, RNNoise (AM, SAM, USB, LSB)
+    double voiceCleanerMix;         // its strength: 1 Full, 0.9 Strong, 0.75 Medium (default), 0.5 Light
+    // Addition to the JS (where both are on by default: limiter on, 0.25 s
+    // mute), off here so the library's output stays as it was by default:
+    bool limiter;                   // headphone limiter: peaks above 0.95 / volume eased down (every mode)
+    double retuneMuteSeconds;       // after an offsetHz change: mute this long, then a 100 ms fade-in (0 = off)
 };
 
 struct RdsInfo {
@@ -105,6 +128,40 @@ public:
     bool squelchOpen() const;
     RdsInfo rds() const;           // WFM only (copy, thread-safe enough for display)
     void resetRds();
+
+    // ---- Smart notch (ReceiverConfig::smartNotch; AM, SAM, USB, LSB) -----------
+    // Its notches are a list of audio frequencies (Hz), at most 3, that the
+    // UI shows as lines and lets the user add, drag and remove.  These may be
+    // called from another thread than process() (a mutex guards the list and
+    // the recorded audio; the analysis runs on a copy, outside the lock).
+    // The list is cleared when the mode changes or offsetHz moves by more
+    // than 2 kHz (as the JS: "cleared when you change station").
+    //
+    // Finds the strongest steady whine in the last 3 s of audio and notches
+    // it (the JS's "Find whine" button).  Returns its frequency in Hz, the
+    // frequency of an existing notch if one is already within 25 Hz of it,
+    // or 0 if there is no whine (then *mainsHumHz is 50 or 60 if what was
+    // found is mains hum, a job for humFilterHz, else 0).
+    double smartNotchFind(int* mainsHumHz = 0);
+    std::vector<double> smartNotches() const;   // Hz, oldest first
+    // Adds a notch at hz (the oldest goes beyond 3); with snap, a click near
+    // a peak of the recent spectrum lands on the peak (the JS's snSnap).
+    // Returns the new notch's index.
+    int smartNotchAdd(double hz, bool snap = true);
+    void smartNotchMove(int index, double hz);  // clamped to 80..4500 Hz
+    void smartNotchRemove(int index);
+    void smartNotchClear();
+    // The strip under the notches: the averaged spectrum (dB) of the last
+    // 8192 audio samples before notching, bins 0 .. maxHz; returns the bin
+    // width in Hz (11.7 Hz at 48 kHz).
+    double smartNotchSpectrum(std::vector<float>& db, double maxHz = 3000) const;
+
+    // Automatic notch: the whistles being notched right now (Hz).
+    std::vector<double> autoNotches() const;
+    // AI voice cleaner: voice probability of the last 10 ms frame (0..1).
+    float voiceProbability() const;
+    // Noise blanker: samples blanked so far, and samples seen.
+    void noiseBlankerStats(unsigned long long& blanked, unsigned long long& total) const;
 
 private:
     Receiver(const Receiver&);

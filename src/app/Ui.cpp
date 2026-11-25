@@ -48,15 +48,21 @@
 #include <ctime>
 
 #include <graphicx/canvas.h>
+#include <graphicx/image_io.h>
 #include <graphicx/png.h>
 #include <graphicx/terminal.h>
 #include <graphicx/widgets.h>
 
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <sys/time.h>
 
+#include "../decoders/Callsign.h"
 #include "../decoders/Clock.h"
+#include "../decoders/Ft8.h"
+#include "../dsp/Propagation.h"
+#include "../dsp/SpectrumTools.h"
 #include "Bands.h"
 #include "DecoderPlan.h"
 
@@ -146,7 +152,7 @@ public:
 // The decoder's output: scrolling text, or the Hellschreiber picture.
 class DecoderView : public Widget {
 public:
-    DecoderView() : picture(false), lineMode(false), pictureId(~0u), pictureWidth(0) {}
+    DecoderView() : picture(false), lineMode(false), pictureId(~0u), pictureWidth(0), serviceMode(false) {}
     std::string title;
     std::string text;                              // everything decoded (last 16 kB)
     std::vector<std::vector<float> > columns;      // Hell columns (last 2000)
@@ -157,6 +163,12 @@ public:
     int pictureWidth;
     std::vector<std::vector<unsigned char> > rows;
     std::function<void()> onTitleClick;
+    // Multi-service decoders (DAB, DRM): the station list on the left, the
+    // text in the middle, the latest slideshow picture on the right.
+    bool serviceMode;
+    std::vector<dec::Service> services;
+    std::function<void(unsigned)> onSelectService;
+    Image slide;
     // Called with the finished picture before a new one starts.
     std::function<void(const Image&)> onPictureDone;
 
@@ -182,10 +194,18 @@ public:
             rows[static_cast<size_t>(l.row)].resize(static_cast<size_t>(pictureWidth) * 3, 0);
         }
     }
+    int listWidth() const { return std::min(34, std::max(18, bounds.width / 4)); }
     bool handle(const Event& e) {
         if (e.type == terminal::EventType::Mouse && e.y == 0 && e.button == terminal::MouseButton::Left &&
             e.action == terminal::MouseAction::Press && onTitleClick) {
             onTitleClick();
+            return true;
+        }
+        // A click on a station in the list chooses it.
+        if (serviceMode && e.type == terminal::EventType::Mouse && e.button == terminal::MouseButton::Left &&
+            e.action == terminal::MouseAction::Press && e.x >= 1 && e.x < 1 + listWidth() && e.y >= 1) {
+            size_t i = static_cast<size_t>(e.y - 1);
+            if (i < services.size() && onSelectService) onSelectService(services[i].id);
             return true;
         }
         return false;
@@ -212,6 +232,45 @@ public:
         in.x += 1;
         in.width -= 2;
         if (in.empty()) return;
+        if (serviceMode) {
+            // Left: the stations; right: the slide; middle: the text.
+            int lw = std::min(listWidth(), in.width / 2);
+            for (size_t i = 0; i < services.size() && static_cast<int>(i) < in.height; ++i) {
+                const dec::Service& sv = services[i];
+                Rgb fg = sv.selected ? t.accentText : (sv.audio ? t.text : t.dim);
+                Rgb bg = sv.selected ? t.accent : t.panel;
+                p.fill(rect(in.x, in.y + static_cast<int>(i), lw, 1), bg);
+                p.text(rect(in.x, in.y + static_cast<int>(i), lw, 1), (sv.selected ? "\xE2\x96\xB6 " : "  ") + sv.label, fg, Align::Left,
+                       sv.selected ? Bold : Plain);
+            }
+            if (services.empty()) p.text(in.x, in.y, "looking for stations...", t.dim);
+            int sx = in.x + lw + 1, sw = in.right() - sx;
+            if (!slide.empty() && sw > 20) {
+                int iw = std::min(sw / 2, in.height * 2 * slide.width() / std::max(1, slide.height()));
+                int ih = std::max(1, std::min(in.height, iw * slide.height() / std::max(1, slide.width()) / 2));
+                Painter img = p.sub(rect(in.right() - iw, in.y, iw, ih));
+                img.image(img.bounds(), slide, PixelMode::HalfBlocks, Filter::Box);
+                sw -= iw + 1;
+            }
+            Rect textArea = rect(sx, in.y, std::max(1, sw), in.height);
+            // Selected service's detail, then the newest text lines.
+            for (size_t i = 0; i < services.size(); ++i)
+                if (services[i].selected) p.text(rect(textArea.x, textArea.y, textArea.width, 1), services[i].detail, t.dim, Align::Left);
+            std::vector<std::string> lines;
+            size_t start = 0;
+            while (start < text.size()) {
+                size_t nl = text.find('\n', start);
+                std::vector<std::string> w = wrap(text.substr(start, nl == std::string::npos ? std::string::npos : nl - start), textArea.width);
+                lines.insert(lines.end(), w.begin(), w.end());
+                if (nl == std::string::npos) break;
+                start = nl + 1;
+            }
+            int rows = textArea.height - 1;
+            int first = std::max(0, static_cast<int>(lines.size()) - rows);
+            for (int i = first; i < static_cast<int>(lines.size()); ++i)
+                p.text(textArea.x, textArea.y + 1 + i - first, lines[static_cast<size_t>(i)], t.text);
+            return;
+        }
         if (lineMode) {
             // FAX / SSTV: the newest part of the picture that fits, at the
             // picture's own aspect ratio (half blocks: 1x2 pixels a cell).
@@ -310,7 +369,7 @@ struct Ui::Impl {
     std::function<void(const std::string&)> promptAction;
     Dialog help, message, confirm;
     std::function<void(int)> confirmAction;
-    Menu decoderMenu;
+    Menu decoderMenu, filterMenu, monitorMenu, viewMenu;
 
     // state
     int stepIndex;
@@ -328,6 +387,7 @@ struct Ui::Impl {
     unsigned wfPhase;
     std::vector<LogEntry> logCache;
     std::unique_ptr<dec::Decoder> probe;  // asked for the decoder's audio centre (tuning marker)
+    std::deque<std::vector<float> > wfRows;   // the waterfall's rows (dB), newest first: Snapshot
     // toolbar (mouse access to everything the keys do)
     std::vector<std::unique_ptr<Button> > toolbar;
     // scan
@@ -339,6 +399,7 @@ struct Ui::Impl {
     bool scanStopped;          // a signal holds the scan here
     std::string notice;        // last action's result, shown in the status bar for a while
     int noticeFrames;
+    bool showMessageLater;     // first run: the welcome message once the screen exists
     dec::ClockCorrection clock;  // the corrected time (time signals), kept in clock.txt
 
     void build();
@@ -371,6 +432,28 @@ struct Ui::Impl {
     void showHelp();
     void savePicture(const Image& img, const std::string& kind);
     void setClock();
+    // Band survey: FT8 on each band from 80 m to 10 m in turn, two slots
+    // each, so the Heard list shows which bands are open.
+    std::vector<double> surveyDials;
+    size_t surveyIndex;
+    double surveyNext;   // corrected time of the next move (0 = off)
+    void toggleSurvey();
+    void surveyStep();
+    void snapshotPicture();
+    // Clean-up filters, AUTO, the Signal Monitor, peak hold and alerts.
+    void openMenu(Menu& m, int x);
+    void fillFilterMenu();
+    void fillViewMenu();
+    void startAuto();
+    void autoStep();
+    bool autoWaiting;          // AUTO is listening
+    double autoDabUntil;       // AUTO picked DAB: it must lock by then (else NFM), 0 = no
+    void monitorHere();
+    void saveMonitorCsv();
+    double monitorStart;       // Unix time of the monitor's first signal
+    dsp::SpectrumExtras extras;
+    bool peakHold, averaging, alerts;
+    void setup();
     static double pcNow() {
         timeval tv;
         gettimeofday(&tv, 0);
@@ -425,7 +508,16 @@ Ui::Impl::Impl(Radio& r, const Options& o, Store& s)
       scanDwell(0),
       scanHold(0),
       scanStopped(false),
-      noticeFrames(0) {
+      noticeFrames(0),
+      showMessageLater(false),
+      surveyIndex(0),
+      surveyNext(0),
+      autoWaiting(false),
+      autoDabUntil(0),
+      monitorStart(0),
+      peakHold(false),
+      averaging(false),
+      alerts(false) {
     themes = themeNames();
     for (size_t i = 0; i < themes.size(); ++i)
         if (themes[i] == o.theme) themeIndex = i;
@@ -545,20 +637,30 @@ void Ui::Impl::startDecoder(dec::Kind kind) {
     if (radio.settings().mode != plan.mode) setMode(plan.mode);
     if (plan.bandwidth > 0) radio.setBandwidth(plan.bandwidth);
     radio.setDecoderShift(plan.shift);  // the dial shows the signal's frequency
+    radio.setCenterOnDial(plan.centerOnDial);
     syncControls();
     radio.setDecoder(true, kind, plan.setup);
     if (decoderView.lineMode && !decoderView.rows.empty()) savePicture(decoderView.pictureImage(), dec::kindName(snap.decoderKind));
     decoderView.clear();
     decoderView.picture = kind == dec::Kind::Hell;
     decoderView.lineMode = kind == dec::Kind::Fax || kind == dec::Kind::Sstv;
+    decoderView.serviceMode = kind == dec::Kind::Dab || kind == dec::Kind::Drm;
+    decoderView.services.clear();
+    decoderView.slide = Image();
+    if (kind == dec::Kind::Dab && !dabChannelAt(radio.settings().frequency)) {
+        // As the browser version: DAB opens on a channel (the nearest one).
+        tune(dabNearest(radio.settings().frequency).hz, false);
+    }
     decoderView.visible = true;
     store.set("decoder", dec::kindName(kind));
     app.relayout();
 }
 
 void Ui::Impl::stopDecoder() {
+    radio.setCenterOnDial(false);
     if (decoderView.lineMode && !decoderView.rows.empty()) savePicture(decoderView.pictureImage(), dec::kindName(snap.decoderKind));
     decoderView.lineMode = false;
+    decoderView.serviceMode = false;
     radio.setDecoder(false);
     radio.setDecoderShift(0);
     decoderView.visible = false;
@@ -715,6 +817,97 @@ void Ui::Impl::logHere() {
     }, "station " + (station.empty() ? std::string("-") : station) + "; written to " + Store::logPath());
 }
 
+// Snapshot: the spectrum and the recent waterfall as one PNG, with a strip
+// along the top saying what it shows (as the browser version's Picture).
+void Ui::Impl::snapshotPicture() {
+    if (spectrum.series.empty() || spectrum.series[0].y.empty()) {
+        say("nothing to picture yet");
+        return;
+    }
+    const int w = 1024, strip = 14, specH = 200, wfH = std::min(300, static_cast<int>(wfRows.size()));
+    Image img(w, strip + specH + wfH, theme(themes[themeIndex]).background);
+    Canvas c(img);
+    const Theme t = app.theme();
+    RadioSettings s = radio.settings();
+    std::time_t now = static_cast<std::time_t>(clock.now(pcNow()));
+    char when[40];
+    std::strftime(when, sizeof(when), "%Y-%m-%d %H:%M UTC", std::gmtime(&now));
+    std::string head = formatFrequency(s.frequency) + " " + dsp::modeName(s.mode) +
+                       (snap.decoderOn ? std::string(" ") + dec::kindName(snap.decoderKind) : std::string()) +
+                       fmt("  %.1f dBFS  ", snap.channelDbfs) + when;
+    c.fillRect(rect(0, 0, w, strip), t.panel);
+    c.text(4, 4, head, t.accent);
+    const std::vector<double>& y = spectrum.series[0].y;
+    const double lo = spectrum.yMin, hi = spectrum.yMax;
+    int prev = -1;
+    for (int x = 0; x < w; ++x) {
+        double v = y[static_cast<size_t>(static_cast<double>(x) / w * y.size())];
+        int py = strip + specH - 1 - static_cast<int>((v - lo) / (hi - lo) * (specH - 1));
+        py = std::max(strip, std::min(strip + specH - 1, py));
+        c.vline(x, py, strip + specH - 1, lerp(t.background, t.accent, 0.3));
+        if (prev >= 0) c.line(x - 1, prev, x, py, t.accent);
+        prev = py;
+    }
+    std::vector<Rgb> map = colormapTable(mapIndex < 0 ? t.colormap : maps[static_cast<size_t>(mapIndex)]);
+    for (int r = 0; r < wfH; ++r) {
+        const std::vector<float>& row = wfRows[static_cast<size_t>(r)];
+        for (int x = 0; x < w; ++x) {
+            float v = row[static_cast<size_t>(static_cast<double>(x) / w * row.size())];
+            double f = (v - waterfall.low) / std::max(1.0, waterfall.high - waterfall.low);
+            img.set(x, strip + specH + r, map[static_cast<size_t>(std::max(0.0, std::min(1.0, f)) * 255)]);
+        }
+    }
+    savePicture(img, "snapshot");
+}
+
+void Ui::Impl::toggleSurvey() {
+    if (surveyNext > 0) {
+        surveyNext = 0;
+        say("band survey stopped");
+        return;
+    }
+    surveyDials.clear();
+    const std::vector<dec::FtxDial>& all = dec::ft8Dials();
+    for (size_t i = 0; i < all.size(); ++i)
+        if (all[i].hz >= 3.5e6 && all[i].hz <= 29.7e6) surveyDials.push_back(all[i].hz);  // 80 m to 10 m
+    if (surveyDials.empty()) return;
+    surveyIndex = 0;
+    if (!(snap.decoderOn && snap.decoderKind == dec::Kind::Ft8)) startDecoder(dec::Kind::Ft8);
+    tune(surveyDials[0], false);
+    double now = clock.now(pcNow());
+    surveyNext = (std::floor(now / 15.0) + 3) * 15.0 + 1;  // this slot's rest, then two whole slots
+    listTabs.selected = 3;
+    fillList();
+    say("band survey: FT8 on each band, two slots each (Survey again: stop)");
+}
+
+void Ui::Impl::surveyStep() {
+    if (surveyNext <= 0 || clock.now(pcNow()) < surveyNext) return;
+    surveyIndex = (surveyIndex + 1) % surveyDials.size();
+    tune(surveyDials[surveyIndex], false);
+    surveyNext += 30;
+}
+
+// Setup: where you are (locator or a city), for distances and bearings;
+// the clock and the stick's correction follow from T and K.
+void Ui::Impl::setup() {
+    ask("Setup: your location", "Locator or city:", store.get("locator"), [this](const std::string& text) {
+        std::string grid = text;
+        double lat, lon;
+        if (!dec::Locator::toLatLon(grid, lat, lon)) {
+            const dec::City* city = dec::findCity(text);
+            if (!city) {
+                prompt.error = "not a locator (e.g. JO21) and not a city I know: " + text;
+                return;
+            }
+            grid = dec::Locator::fromLatLon(city->lat, city->lon);
+        }
+        store.set("locator", grid);
+        radio.setLocator(grid);
+        say("location " + grid + "; next: K calibrates the stick on a known station, T sets the clock from a time signal");
+    }, "a Maidenhead locator (JO21ek) or a city (Amsterdam, London, Sao Paulo)");
+}
+
 // T / "Set clock": the decoded time code becomes the clock's correction.
 void Ui::Impl::setClock() {
     const dec::Status& d = snap.decoder;
@@ -750,6 +943,122 @@ void Ui::Impl::savePicture(const Image& img, const std::string& kind) {
     else say(error);
 }
 
+// ------------------------------------------- filters, AUTO, monitor, view --
+
+void Ui::Impl::openMenu(Menu& m, int x) {
+    m.place(x, 4, screen());
+    app.openPopup(m);
+}
+
+void Ui::Impl::fillFilterMenu() {
+    static const char* nr[] = {"off", "low", "medium", "high"};
+    static const char* vc[] = {"off", "light", "medium", "strong", "full"};
+    RadioSettings f = radio.settings();
+    filterMenu.items.clear();
+    filterMenu.addItem("Noise blanker (clicks, ignition)", std::string(), f.noiseBlanker);
+    filterMenu.addItem(std::string("Noise reduction: ") + nr[std::max(0, std::min(3, f.noiseReduction))], std::string(),
+                       f.noiseReduction > 0);
+    filterMenu.addItem(f.humFilterHz ? fmt("Hum filter: %d Hz", f.humFilterHz) : std::string("Hum filter: off"), std::string(),
+                       f.humFilterHz > 0);
+    filterMenu.addItem("Auto notch (whistles)", std::string(), f.autoNotch);
+    filterMenu.addItem(std::string("AI voice cleaner: ") + vc[std::max(0, std::min(4, f.voiceCleaner))], std::string(),
+                       f.voiceCleaner > 0);
+    filterMenu.addItem("Limiter", std::string(), f.limiter);
+    filterMenu.addSeparator();
+    filterMenu.addItem("All off");
+}
+
+void Ui::Impl::fillViewMenu() {
+    viewMenu.items.clear();
+    viewMenu.addItem("Peak hold", std::string(), peakHold);
+    viewMenu.addItem("Averaging", std::string(), averaging);
+    viewMenu.addItem("New-signal alerts", std::string(), alerts);
+}
+
+void Ui::Impl::startAuto() {
+    stopScan();
+    autoDabUntil = 0;
+    radio.startAuto();
+    autoWaiting = true;
+    say("AUTO: listening...");
+}
+
+// Applies AUTO's verdict (as the browser version: the mode, the decoder and
+// where to tune); DAB must then lock within 6 s, else NFM.
+void Ui::Impl::autoStep() {
+    if (autoDabUntil > 0) {
+        if (snap.decoderOn && snap.decoderKind == dec::Kind::Dab && snap.decoder.locked) {
+            autoDabUntil = 0;
+            say("AUTO: DAB ensemble found");
+        } else if (pcNow() > autoDabUntil) {
+            autoDabUntil = 0;
+            stopDecoder();
+            setMode(dsp::Mode::NFM);
+            say("AUTO: no DAB ensemble here; NFM");
+        }
+    }
+    if (!autoWaiting) return;
+    dsp::AutoResult r;
+    if (!radio.takeAutoResult(r)) return;
+    autoWaiting = false;
+    dec::Kind kind;
+    dsp::Mode mode;
+    if (!r.decoder.empty() && dec::parseKind(r.decoder, kind)) {
+        // AUTO's tuneHz is the signal's frequency, as the dial in decoder
+        // modes (the receiver sits the decoder's shift lower).
+        if (kind != dec::Kind::Dab && r.tuneHz > 0) tune(r.tuneHz, false);
+        if (!(snap.decoderOn && snap.decoderKind == kind)) startDecoder(kind);
+        if (r.needsConfirm) autoDabUntil = pcNow() + 6;
+    } else {
+        if (snap.decoderOn) stopDecoder();
+        if (dsp::parseMode(r.mode, mode)) setMode(mode);
+        if (r.tuneHz > 0) tune(r.tuneHz, false);
+    }
+    syncControls();
+    std::string text = "AUTO: " + (r.label.empty() ? r.mode : r.label);
+    if (!r.sure.empty()) text += " (" + r.sure + ")";
+    if (r.tuneHz > 0) text += " at " + formatFrequency(r.tuneHz);
+    if (!r.found) text = "AUTO: nothing recognised; " + (r.label.empty() ? r.mode : r.label);
+    say(text);
+}
+
+void Ui::Impl::monitorHere() {
+    if (radio.monitorCount() >= 8) {
+        say("the monitor watches 8 signals at most (Del removes one from its list)");
+        return;
+    }
+    RadioSettings s = radio.settings();
+    double lo, hi;
+    passband(lo, hi);
+    std::string name = snap.rds.ps;
+    while (!name.empty() && name[name.size() - 1] == ' ') name.erase(name.size() - 1);
+    for (size_t i = 0; i < store.labels.size() && name.empty(); ++i)
+        if (std::fabs(store.labels[i].hz - s.frequency) <= 500) name = store.labels[i].text;
+    if (name.empty()) name = formatShort(s.frequency) + " " + dsp::modeName(s.mode);
+    if (radio.monitorAdd((lo + hi) / 2, hi - lo, dsp::modeName(s.mode), name) < 0) {
+        say("cannot watch that signal");
+        return;
+    }
+    if (monitorStart == 0) monitorStart = clock.now(pcNow());
+    listTabs.selected = 4;
+    fillList();
+    say("watching " + name + " (Monitor list; Monitor menu: follow, save the log)");
+}
+
+void Ui::Impl::saveMonitorCsv() {
+    if (radio.monitorCount() == 0) {
+        say("nothing watched yet (O watches the signal you are on)");
+        return;
+    }
+    std::time_t now = std::time(0);
+    char name[64];
+    std::strftime(name, sizeof(name), "offgrid-monitor-%Y%m%d-%H%M%S.csv", std::localtime(&now));
+    std::ofstream f(name);
+    f << radio.monitorCsv(monitorStart);
+    if (f) say(std::string("saved ") + name);
+    else say(std::string("cannot write ") + name);
+}
+
 // ------------------------------------------------------------------- lists --
 
 void Ui::Impl::fillList() {
@@ -770,9 +1079,63 @@ void Ui::Impl::fillList() {
             ListBox::Item it = {"(M saves a memory)", std::string(), true, app.theme().dim};
             list.items.push_back(it);
         }
+    } else if (listTabs.selected == 4) {
+        // The Signal Monitor: one line a signal (Enter tunes to it).
+        for (int i = 0; i < radio.monitorCount(); ++i) {
+            dsp::MonitorStats st = radio.monitorStats(i);
+            std::string name = radio.monitorName(i);
+            if (radio.monitorFollowing(i)) name = "\xE2\x86\x94" + name;  // following
+            std::string right = st.away ? std::string("out of view")
+                                        : std::string(st.on ? "\xE2\x97\x8F" : " ") + fmt("%2.0f dB", st.snr) +
+                                              fmt(" %3.0f%%", st.duty * 100);
+            ListBox::Item it = {name, right, false, rgb(0, 0, 0)};
+            list.items.push_back(it);
+            std::string detail = fmt("  %d tx", st.nTx);
+            if (st.interval == st.interval) detail += fmt(", every %.1f s", st.interval);
+            if (st.driftPerMin == st.driftPerMin && st.driftPerMin != 0) detail += fmt(", %+.1f Hz/min", st.driftPerMin);
+            ListBox::Item d = {detail, std::string(), true, app.theme().dim};
+            list.items.push_back(d);
+        }
+        if (radio.monitorCount() == 0) {
+            ListBox::Item it = {"(O watches the signal you are on)", std::string(), true, app.theme().dim};
+            list.items.push_back(it);
+        }
     } else if (listTabs.selected == 3) {
-        // Heard: who this station hears, band by band, the last hour
-        // (every FT8 / FT4 / WSPR decode).
+        // Heard: likely bands open (from the locator, or the time zone), then
+        // who this station hears, band by band, the last hour (every FT8 /
+        // FT4 / WSPR decode).
+        {
+            double lat = 0, lon = 0;
+            bool fromLocator = dsp::locatorToLatLon(store.get("locator"), &lat, &lon);
+            if (!fromLocator) {
+                std::time_t t = std::time(0);
+                std::tm local = *std::localtime(&t), utc = *std::gmtime(&t);
+                local.tm_isdst = 0;
+                int east = static_cast<int>(std::difftime(std::mktime(&local), std::mktime(&utc)) / 60);
+                dsp::placeFromUtcOffset(east, &lat, &lon);
+            }
+            double now = clock.now(pcNow());
+            dsp::PropGuide ham = dsp::propagationGuide(now, lat, lon, true, fromLocator);
+            dsp::PropGuide bc = dsp::propagationGuide(now, lat, lon, false, fromLocator);
+            std::string open, sw;
+            for (size_t i = 0; i < ham.open.size(); ++i) open += (i ? ", " : "") + ham.open[i];
+            for (size_t i = 0; i < bc.open.size(); ++i) sw += (i ? ", " : "") + bc.open[i];
+            ListBox::Item a = {"Open: " + (open.empty() ? std::string("none likely") : open), std::string("ham"), true, app.theme().good};
+            list.items.push_back(a);
+            if (!ham.possible.empty()) {
+                std::string p;
+                for (size_t i = 0; i < ham.possible.size(); ++i) p += (i ? ", " : "") + ham.possible[i];
+                ListBox::Item b = {"Possible: " + p, std::string(), true, app.theme().dim};
+                list.items.push_back(b);
+            }
+            ListBox::Item c = {"Open: " + (sw.empty() ? std::string("none likely") : sw), std::string("SW"), true, app.theme().good};
+            list.items.push_back(c);
+            if (!fromLocator) {
+                ListBox::Item d = {"(Setup: your locator for a better guess)", std::string(), true, app.theme().dim};
+                list.items.push_back(d);
+            }
+        }
+        size_t guideLines = list.items.size();
         std::string text = radio.heardText(pcNow() - clock.offsetAt(pcNow()), 3600, false);
         size_t start = 0;
         while (start < text.size()) {
@@ -785,7 +1148,7 @@ void Ui::Impl::fillList() {
             if (nl == std::string::npos) break;
             start = nl + 1;
         }
-        if (list.items.empty()) {
+        if (list.items.size() == guideLines) {
             ListBox::Item it = {"(FT8, FT4 and WSPR decodes show here)", std::string(), true, app.theme().dim};
             list.items.push_back(it);
         }
@@ -817,6 +1180,12 @@ void Ui::Impl::saveState() {
     store.setNumber("ppm", s.ppm);
     store.set("stereo", s.stereo ? "1" : "0");
     store.setNumber("deemphasis", s.deemphasisUs);
+    store.set("noise_blanker", s.noiseBlanker ? "1" : "0");
+    store.setNumber("noise_reduction", s.noiseReduction);
+    store.setNumber("hum_filter", s.humFilterHz);
+    store.set("auto_notch", s.autoNotch ? "1" : "0");
+    store.setNumber("voice_cleaner", s.voiceCleaner);
+    store.set("limiter", s.limiter ? "1" : "0");
     store.set("theme", themes[themeIndex]);
     store.set("colormap", mapIndex < 0 ? std::string() : std::string(colormapName(maps[static_cast<size_t>(mapIndex)])));
     store.setNumber("step", stepIndex);
@@ -868,6 +1237,11 @@ void Ui::Impl::build() {
     series.useColor = false;
     series.color = rgb(0, 0, 0);
     spectrum.series.push_back(series);
+    Plot::Series peak;  // peak hold (View menu)
+    peak.fill = false;
+    peak.useColor = true;
+    peak.color = rgb(0, 0, 0);
+    spectrum.series.push_back(peak);
     spectrum.onMouse = [this](double x, double, const Event& e) {
         using terminal::MouseAction;
         using terminal::MouseButton;
@@ -890,6 +1264,10 @@ void Ui::Impl::build() {
     };
     decoderView.visible = false;
     decoderView.onTitleClick = [this]() { openDecoderMenu(); };
+    decoderView.onSelectService = [this](unsigned id) {
+        radio.decoderCommand([id](dec::Decoder& d) { d.selectService(id); });
+        say("station chosen");
+    };
     decoderView.onPictureDone = [this](const Image& img) {
         savePicture(img, snap.decoderOn ? std::string(dec::kindName(snap.decoderKind)) : std::string("picture"));
     };
@@ -900,6 +1278,16 @@ void Ui::Impl::build() {
     };
     Tool tools[] = {
         {"Decoder \xE2\x96\xBE", [this]() { openDecoderMenu(); }},
+        {"AUTO", [this]() { startAuto(); }},
+        {"Filters \xE2\x96\xBE", [this]() {
+             fillFilterMenu();
+             openMenu(filterMenu, 12);
+         }},
+        {"Monitor \xE2\x96\xBE", [this]() { openMenu(monitorMenu, 22); }},
+        {"View \xE2\x96\xBE", [this]() {
+             fillViewMenu();
+             openMenu(viewMenu, 32);
+         }},
         {"Memory +", [this]() { saveMemory(); }},
         {"Label", [this]() { labelHere(); }},
         {"Log", [this]() { logHere(); }},
@@ -915,9 +1303,34 @@ void Ui::Impl::build() {
         {"Record", [this]() { toggleRecording(); }},
         {"Save picture", [this]() {
              if (decoderView.lineMode) savePicture(decoderView.pictureImage(), dec::kindName(snap.decoderKind));
+             else if (decoderView.serviceMode && !decoderView.slide.empty()) savePicture(decoderView.slide, dec::kindName(snap.decoderKind));
              else say("no picture: start the FAX or SSTV decoder (d)");
          }},
         {"Set clock", [this]() { setClock(); }},
+        {"Replay", [this]() {
+             if (radio.replaying()) {
+                 radio.stopReplay();
+                 say("live again");
+                 return;
+             }
+             std::string error;
+             if (radio.startReplay(error)) say("replaying the last seconds (tune around; Replay again: live)");
+             else say(error);
+         }},
+        {"Save IQ", [this]() {
+             std::time_t now = std::time(0);
+             char name[96];
+             RadioSettings s = radio.settings();
+             std::strftime(name, sizeof(name), "%Y%m%d-%H%M%S", std::localtime(&now));
+             std::string path = std::string("offgrid-") + name + fmt("-%.0fHz", snap.centerHz) + fmt("-%.0fsps.cu8", snap.sampleRate);
+             std::string error;
+             if (radio.saveIq(path, error)) say("saved " + path + " (play: --file it --center " + fmt("%.0f", snap.centerHz) + ")");
+             else say(error);
+             (void)s;
+         }},
+        {"Snapshot", [this]() { snapshotPicture(); }},
+        {"Setup", [this]() { setup(); }},
+        {"Survey", [this]() { toggleSurvey(); }},
         {"Theme", [this]() {
              themeIndex = (themeIndex + 1) % themes.size();
              app.setTheme(theme(themes[themeIndex]));
@@ -937,6 +1350,7 @@ void Ui::Impl::build() {
     listTabs.tabs.push_back("Memories");
     listTabs.tabs.push_back("Log");
     listTabs.tabs.push_back("Heard");
+    listTabs.tabs.push_back("Monitor");
     listTabs.onChange = [this](int) {
         list.selected = 0;
         fillList();
@@ -959,6 +1373,8 @@ void Ui::Impl::build() {
             tune(m.hz, false);
         } else if (listTabs.selected == 2 && i < static_cast<int>(logCache.size())) {
             tune(logCache[static_cast<size_t>(i)].hz, false);
+        } else if (listTabs.selected == 4 && i / 2 < radio.monitorCount()) {  // two lines a signal
+            tune(radio.monitorCentre(i / 2), false);
         }
         syncControls();
         app.clearFocus();
@@ -1024,6 +1440,8 @@ void Ui::Impl::build() {
             case dec::Kind::Fax: name = "Weather fax"; break;
             case dec::Kind::Sstv: name = "SSTV (pictures)"; break;
             case dec::Kind::Time: name = "Time signal (CHU/WWV/RWM)"; break;
+            case dec::Kind::Dab: name = "DAB / DAB+ (digital radio)"; break;
+            case dec::Kind::Drm: name = "DRM (digital shortwave)"; break;
             default: break;
         }
         decoderMenu.addItem(name);
@@ -1034,6 +1452,76 @@ void Ui::Impl::build() {
         std::vector<dec::Kind> k = dec::allKinds();
         if (i >= 0 && i < static_cast<int>(k.size())) startDecoder(k[static_cast<size_t>(i)]);
         else stopDecoder();
+    };
+
+    filterMenu.title = "Clean-up filters";
+    filterMenu.onPick = [this](int i) {
+        RadioSettings f = radio.settings();
+        std::string what;
+        static const char* nr[] = {"off", "low", "medium", "high"};
+        static const char* vc[] = {"off", "light", "medium", "strong", "full"};
+        switch (i) {
+            case 0: f.noiseBlanker = !f.noiseBlanker; what = std::string("noise blanker ") + (f.noiseBlanker ? "on" : "off"); break;
+            case 1: f.noiseReduction = (f.noiseReduction + 1) % 4; what = std::string("noise reduction ") + nr[f.noiseReduction]; break;
+            case 2: f.humFilterHz = f.humFilterHz == 0 ? 50 : (f.humFilterHz == 50 ? 60 : 0);
+                    what = f.humFilterHz ? fmt("hum filter %d Hz", f.humFilterHz) : std::string("hum filter off"); break;
+            case 3: f.autoNotch = !f.autoNotch; what = std::string("auto notch ") + (f.autoNotch ? "on" : "off"); break;
+            case 4: f.voiceCleaner = (f.voiceCleaner + 1) % 5; what = std::string("AI voice cleaner ") + vc[f.voiceCleaner]; break;
+            case 5: f.limiter = !f.limiter; what = std::string("limiter ") + (f.limiter ? "on" : "off"); break;
+            case 7:
+                f.noiseBlanker = f.autoNotch = false;
+                f.noiseReduction = f.humFilterHz = f.voiceCleaner = 0;
+                what = "filters off (limiter kept)";
+                break;
+            default: return;
+        }
+        radio.setFilters(f);
+        dsp::Mode m = f.mode;
+        bool voice = m == dsp::Mode::AM || m == dsp::Mode::SAM || m == dsp::Mode::USB || m == dsp::Mode::LSB;
+        if (!voice && i != 5 && !((i == 0 || i == 2) && m == dsp::Mode::CW)) what += " (works in AM, SAM, USB, LSB)";
+        say(what);
+    };
+    monitorMenu.title = "Signal Monitor";
+    monitorMenu.addItem("Watch this signal", "O");
+    monitorMenu.addItem("Show the list");
+    monitorMenu.addItem("Follow the selected signal on/off");
+    monitorMenu.addItem("Stop watching the selected signal", "Del");
+    monitorMenu.addItem("Save the log (CSV)");
+    monitorMenu.onPick = [this](int i) {
+        int sel = listTabs.selected == 4 && list.selected >= 0 ? list.selected / 2 : -1;
+        if (i == 0) monitorHere();
+        else if (i == 1) {
+            listTabs.selected = 4;
+            fillList();
+        } else if (i == 2 || i == 3) {
+            if (sel < 0 || sel >= radio.monitorCount()) {
+                say("choose a signal in the Monitor list first");
+                return;
+            }
+            if (i == 3) {
+                radio.monitorRemove(sel);
+                say("stopped watching");
+            } else {
+                bool on = !radio.monitorFollowing(sel);
+                radio.monitorFollow(sel, on);
+                say(on ? "following its drift" : "fixed in place");
+            }
+            fillList();
+        } else if (i == 4) saveMonitorCsv();
+    };
+    viewMenu.title = "Spectrum";
+    viewMenu.onPick = [this](int i) {
+        if (i == 0) peakHold = !peakHold;
+        else if (i == 1) averaging = !averaging;
+        else if (i == 2) {
+            alerts = !alerts;
+            if (alerts) extras.restart();
+            say(alerts ? "alerts on: learning the band for 10 s, then new signals are announced" : "alerts off");
+        }
+        extras.setPeakHold(peakHold);
+        extras.setAveraging(averaging);
+        extras.setAlerts(alerts);
+        if (spectrum.series.size() > 1 && !peakHold) spectrum.series[1].y.clear();
     };
 
     help.title = "Keys";
@@ -1048,6 +1536,9 @@ void Ui::Impl::build() {
         "l           label this frequency (empty: remove) L  log what you hear\n"
         "n / N       scan this band / the memories        K  calibrate on a known station\n"
         "T           set the clock from a time signal (time decoder)\n"
+        "A           AUTO: work out what the signal is      F  clean-up filters (blanker, NR, AI voice)\n"
+        "O           watch this signal (Signal Monitor)    Del  stop watching (Monitor list)\n"
+        "j / k       DAB / DRM: next / previous station (or click it); DAB: Left/Right step channels\n"
         "+ / -, space  volume, mute                       g / G, a  RF gain down / up, auto\n"
         "s / S       squelch down / up                    w / W  filter narrower / wider\n"
         "z / Z       zoom in / out                        [ ] { }  waterfall floor / range\n"
@@ -1066,6 +1557,8 @@ void Ui::Impl::build() {
     syncControls();
     fillList();
     bindKeys();
+    if (store.values.empty() && options.decoder.empty())
+        showMessageLater = true;
     dec::Kind k;
     std::string want = !options.decoder.empty() ? options.decoder : store.get("decoder");
     if (!want.empty() && dec::parseKind(want, k)) startDecoder(k);
@@ -1094,11 +1587,15 @@ void Ui::Impl::layout(const Rect& r) {
     meter.bounds = rect(meterX, 0, w - meterX - 1, 2);
     levelHistory.bounds = rect(meterX + 2, 2, std::max(0, w - meterX - 16), 1);
     clockLabel.bounds = rect(w - 13, 2, 12, 1);
-    int tx = 1;  // toolbar on row 3
+    int tx = 1, ty = 3;  // toolbar on row 3, wrapping onto row 4
     for (size_t i = 0; i < toolbar.size(); ++i) {
         int bw = columns(toolbar[i]->label) + 2;
+        if (tx + bw > w && ty == 3) {
+            tx = 1;
+            ty = 4;
+        }
         toolbar[i]->visible = tx + bw <= w;
-        toolbar[i]->bounds = rect(tx, 3, bw, 1);
+        toolbar[i]->bounds = rect(tx, ty, bw, 1);
         tx += bw + 1;
     }
     status.bounds = rect(0, h - 1, w, 1);
@@ -1146,20 +1643,34 @@ void Ui::Impl::bindKeys() {
     // (With the side list focused, Left/Right change its tab instead.)
     app.bindKey(KeyRight, [this]() {
         if (app.focused() == &list) {
-            listTabs.selected = (listTabs.selected + 1) % 4;
+            listTabs.selected = (listTabs.selected + 1) % 5;
             listTabs.onChange(listTabs.selected);
             return;
         }
         stopScan();
+        if (snap.decoderOn && snap.decoderKind == dec::Kind::Dab) {  // DAB: the next channel
+            const std::vector<DabChannel>& c = dabChannels();
+            const DabChannel& cur = dabNearest(radio.settings().frequency);
+            size_t i = static_cast<size_t>(&cur - &c[0]);
+            tune(c[std::min(c.size() - 1, i + 1)].hz, false);
+            return;
+        }
         tune(radio.settings().frequency + step());
     });
     app.bindKey(KeyLeft, [this]() {
         if (app.focused() == &list) {
-            listTabs.selected = (listTabs.selected + 3) % 4;
+            listTabs.selected = (listTabs.selected + 4) % 5;
             listTabs.onChange(listTabs.selected);
             return;
         }
         stopScan();
+        if (snap.decoderOn && snap.decoderKind == dec::Kind::Dab) {  // DAB: the previous channel
+            const std::vector<DabChannel>& c = dabChannels();
+            const DabChannel& cur = dabNearest(radio.settings().frequency);
+            size_t i = static_cast<size_t>(&cur - &c[0]);
+            tune(c[i > 0 ? i - 1 : 0].hz, false);
+            return;
+        }
         tune(radio.settings().frequency - step());
     });
     app.bindKey(KeyUp, [this]() { stepIndex = std::min(kStepCount - 1, stepIndex + 1); });
@@ -1224,12 +1735,21 @@ void Ui::Impl::bindKeys() {
         waterfall.clear();
     });
     app.bindKey('R', [this]() { toggleRecording(); });
+    app.bindKey('A', [this]() { startAuto(); });
+    app.bindKey('F', [this]() {
+        fillFilterMenu();
+        openMenu(filterMenu, 12);
+    });
+    app.bindKey('O', [this]() { monitorHere(); });
     app.bindKey('d', [this]() { openDecoderMenu(); });
     app.bindKey('D', [this]() { stopDecoder(); });
     app.bindKey('M', [this]() { saveMemory(); });
     app.bindKey(KeyDelete, [this]() {
         if (listTabs.selected == 1 && list.selected >= 0 && list.selected < static_cast<int>(store.memories.size())) {
             store.memories.erase(store.memories.begin() + list.selected);
+            fillList();
+        } else if (listTabs.selected == 4 && list.selected >= 0 && list.selected / 2 < radio.monitorCount()) {
+            radio.monitorRemove(list.selected / 2);
             fillList();
         }
     });
@@ -1244,6 +1764,19 @@ void Ui::Impl::bindKeys() {
         else startScan(ScanMemories);
     });
     app.bindKey('K', [this]() { calibrate(); });
+    // DAB / DRM: next / previous station.
+    std::function<void(int)> stepService = [this](int dir) {
+        const std::vector<dec::Service>& sv = decoderView.services;
+        if (sv.empty()) return;
+        int cur = 0;
+        for (size_t i = 0; i < sv.size(); ++i)
+            if (sv[i].selected) cur = static_cast<int>(i);
+        int next = (cur + dir + static_cast<int>(sv.size())) % static_cast<int>(sv.size());
+        unsigned id = sv[static_cast<size_t>(next)].id;
+        radio.decoderCommand([id](dec::Decoder& d) { d.selectService(id); });
+    };
+    app.bindKey('j', [stepService]() { stepService(1); });
+    app.bindKey('k', [stepService]() { stepService(-1); });
     app.bindKey('T', [this]() { setClock(); });
     std::function<void()> showHelp = [this]() { this->showHelp(); };
     app.bindKey(KeyF1, showHelp);
@@ -1272,6 +1805,13 @@ void Ui::Impl::update() {
     RadioSettings s = radio.settings();
     const Theme& t = app.theme();
     ++framesSinceStart;
+    if (showMessageLater && framesSinceStart == 3) {
+        showMessageLater = false;
+        showMessage("Welcome to offgrid",
+                    "Setup (toolbar) tells offgrid where you are, for distances and bearings. K calibrates the stick on "
+                    "a station of known frequency, T sets the clock from a time signal (FT8, FT4 and WSPR need it right). "
+                    "F1 lists every key; the mouse works everywhere.");
+    }
 
     // Scan: judge the channel once the dwell time is over.
     if (scanKind != ScanOff) {
@@ -1299,8 +1839,9 @@ void Ui::Impl::update() {
         app.relayout();
     }
     const Band* band = bandAt(s.frequency);
+    const DabChannel* dabCh = dabChannelAt(s.frequency);
     char info[200];
-    std::snprintf(info, sizeof(info), "%s   step %s   filter %s   %s%s", band ? band->name.c_str() : "-", stepName(step()).c_str(),
+    std::snprintf(info, sizeof(info), "%s   step %s   filter %s   %s%s", dabCh && snap.decoderOn ? (std::string("DAB ") + dabCh->name).c_str() : (band ? band->name.c_str() : "-"), stepName(step()).c_str(),
                   formatShort(s.bandwidth > 0 ? s.bandwidth : dsp::defaultBandwidth(s.mode)).c_str(),
                   s.ppm != 0 ? (fmt("%+.2f ppm   ", s.ppm)).c_str() : "", app.focused() ? "[Esc: keys back to tuning]" : "");
     infoLabel.text = info;
@@ -1330,6 +1871,9 @@ void Ui::Impl::update() {
     meter.valueText = fmt("%5.1f dB", snap.channelDbfs) + fmt("  SNR %4.1f", snap.channelDbfs - snap.noiseDbfs);
     if (framesSinceStart % 3 == 0) levelHistory.push(snap.channelDbfs, 512);
     if (listTabs.selected == 3 && framesSinceStart % 90 == 0) fillList();
+    if (listTabs.selected == 4 && framesSinceStart % 10 == 0) fillList();
+    surveyStep();
+    autoStep();
     {
         std::string proto;
         std::vector<double> dts;
@@ -1373,6 +1917,17 @@ void Ui::Impl::update() {
             if (dc >= 1 && dc + 1 < static_cast<int>(view.size()))
                 view[static_cast<size_t>(dc)] = 0.5f * (view[static_cast<size_t>(dc - 1)] + view[static_cast<size_t>(dc + 1)]);
             spectrum.series[0].y.assign(view.begin(), view.end());
+            if (peakHold || averaging || alerts) {
+                double plo, phi;
+                passband(plo, phi);
+                extras.frame(&view[0], static_cast<int>(view.size()), winLow, winHigh, pcNow(), plo, phi);
+                if (averaging && extras.average().size() == view.size())
+                    spectrum.series[0].y.assign(extras.average().begin(), extras.average().end());
+                if (peakHold && extras.peak().size() == view.size())
+                    spectrum.series[1].y.assign(extras.peak().begin(), extras.peak().end());
+                const std::vector<dsp::SpectrumAlert>& fresh = extras.lastAlerts();
+                if (alerts && !fresh.empty()) say("new signal at " + formatShort(fresh.back().hz) + fmt(" (%.0f dB)", fresh.back().level));
+            }
             if (autoFloor && framesSinceStart > 10) {
                 std::vector<float> sorted(view);
                 std::nth_element(sorted.begin(), sorted.begin() + static_cast<long>(sorted.size() / 5), sorted.end());
@@ -1387,7 +1942,10 @@ void Ui::Impl::update() {
             else
                 for (size_t k = 0; k < view.size(); ++k) wfHold[k] = std::max(wfHold[k], view[k]);
             if (++wfPhase % 2 == 0) {
+                if (wfRows.size() && wfRows.front().size() != wfHold.size()) wfRows.clear();
                 waterfall.addRow(wfHold);
+                wfRows.push_front(wfHold);
+                if (wfRows.size() > 300) wfRows.pop_back();
                 wfHold.clear();
             }
         }
@@ -1415,6 +1973,22 @@ void Ui::Impl::update() {
             Plot::Marker m = {s.frequency - s.decoderShift + toneHz, t.good, std::string()};
             spectrum.markers.push_back(m);
         }
+        spectrum.series[1].color = lerp(t.background, t.warn, 0.7);
+        // Watched signals (Signal Monitor) and recent new-signal alerts.
+        for (int i = 0; i < radio.monitorCount(); ++i) {
+            double mc = radio.monitorCentre(i), mw = radio.monitorWidth(i);
+            if (mc + mw / 2 < winLow || mc - mw / 2 > winHigh) continue;
+            Plot::BandArea ba = {mc - mw / 2, mc + mw / 2, lerp(t.background, t.good, 0.18)};
+            spectrum.bands.push_back(ba);
+        }
+        if (alerts) {
+            const std::vector<dsp::SpectrumAlert>& seen = extras.recentAlerts();
+            for (size_t i = 0; i < seen.size(); ++i) {
+                if (pcNow() - seen[i].t > 60 || seen[i].hz < winLow || seen[i].hz > winHigh) continue;
+                Plot::Marker m = {seen[i].hz, t.warn, "new"};
+                spectrum.markers.push_back(m);
+            }
+        }
         Plot::Marker dial = {s.frequency, t.accent, std::string()};
         spectrum.markers.push_back(dial);
         Plot::Marker wm = {(s.frequency - winLow) / (winHigh - winLow), t.accent, std::string()};
@@ -1426,6 +2000,18 @@ void Ui::Impl::update() {
         std::string text;
         radio.takeDecoderText(text);
         decoderView.addText(text);
+        if (decoderView.serviceMode) {
+            decoderView.services = radio.decoderServices();
+            std::vector<dec::Decoder::EncodedImage> images;
+            radio.takeDecoderImages(images);
+            for (size_t i = 0; i < images.size(); ++i) {
+                try {
+                    decoderView.slide = loadImageFromMemory(&images[i].bytes[0], images[i].bytes.size());
+                } catch (const std::exception&) {
+                    // a broken slide: keep the previous one
+                }
+            }
+        }
         if (decoderView.lineMode) {
             std::vector<dec::PictureLine> lines;
             radio.takeDecoderLines(lines);
@@ -1476,8 +2062,12 @@ void Ui::Impl::update() {
     status.addLeft(fmt("DSP %3.0f%%", snap.dspLoad * 100));
     status.addLeft("audio " + radio.audioName() + fmt(" %3.0f ms", snap.audioQueued * 1000) +
                    (snap.audioUnderruns ? fmt(" gaps %.0f", static_cast<double>(snap.audioUnderruns)) : std::string()));
+    if (snap.decoderBlocksDropped)
+        status.addLeft(fmt("decoder behind %.0f", static_cast<double>(snap.decoderBlocksDropped)), t.accentText, t.warn);
     if (snap.samplesDropped) status.addLeft(fmt("dropped %.0f", static_cast<double>(snap.samplesDropped)), t.accentText, t.warn);
     if (radio.recording()) status.addLeft(fmt("REC %.0f s", radio.recordedSeconds()), t.accentText, t.bad);
+    if (surveyNext > 0) status.addLeft("SURVEY " + formatShort(surveyDials[surveyIndex]), t.accentText, t.warn);
+    if (radio.replaying()) status.addLeft(fmt("REPLAY %.1f s", radio.replayPosition()), t.accentText, t.warn);
     if (noticeFrames > 0) {
         --noticeFrames;
         status.addLeft(notice, t.accentText, t.good);

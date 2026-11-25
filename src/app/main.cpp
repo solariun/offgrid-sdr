@@ -26,6 +26,7 @@
 #include <ctime>
 #include <graphicx/png.h>
 
+#include <sys/stat.h>
 #include <sys/time.h>
 
 #include <fstream>
@@ -179,8 +180,15 @@ void applyStore(const app::Store& st, app::Options& o) {
     o.radio.ppm = st.getNumber("ppm", o.radio.ppm);
     o.radio.stereo = st.get("stereo", o.radio.stereo ? "1" : "0") == "1";
     o.radio.deemphasisUs = st.getNumber("deemphasis", o.radio.deemphasisUs);
+    o.radio.noiseBlanker = st.get("noise_blanker", "0") == "1";
+    o.radio.noiseReduction = static_cast<int>(st.getNumber("noise_reduction", 0));
+    o.radio.humFilterHz = static_cast<int>(st.getNumber("hum_filter", 0));
+    o.radio.autoNotch = st.get("auto_notch", "0") == "1";
+    o.radio.voiceCleaner = static_cast<int>(st.getNumber("voice_cleaner", 0));
+    o.radio.limiter = st.get("limiter", "1") == "1";
     if (!st.get("theme").empty()) o.theme = st.get("theme");
     o.locator = st.get("locator", o.locator);
+    o.upconverter = st.getNumber("upconverter", o.upconverter);
     o.colormap = st.get("colormap", o.colormap);
 }
 
@@ -190,6 +198,38 @@ int main(int argc, char** argv) {
     std::string error;
     bool fresh = false;
     for (int i = 1; i < argc; ++i) fresh = fresh || std::string(argv[i]) == "--fresh";
+    // --backup / --restore: the settings file (memories, labels ...) and
+    // the clock, as one text file.
+    for (int i = 1; i + 1 < argc; ++i) {
+        std::string a = argv[i];
+        std::string dir = app::Store::directory();
+        if (a == "--backup") {
+            std::ifstream s1((dir + "/settings.ini").c_str()), s2((dir + "/clock.txt").c_str());
+            std::ofstream out(argv[i + 1]);
+            out << "#offgrid-backup settings.ini\n" << s1.rdbuf() << "\n#offgrid-backup clock.txt\n" << s2.rdbuf();
+            std::printf("%s %s\n", out ? "settings saved to" : "cannot write", argv[i + 1]);
+            return out ? 0 : 1;
+        }
+        if (a == "--restore") {
+            std::ifstream in(argv[i + 1]);
+            if (!in) {
+                std::fprintf(stderr, "offgrid: cannot read %s\n", argv[i + 1]);
+                return 1;
+            }
+            std::string line, file;
+            std::ofstream out;
+            mkdir(dir.c_str(), 0755);
+            while (std::getline(in, line)) {
+                if (line.compare(0, 16, "#offgrid-backup ") == 0) {
+                    if (out.is_open()) out.close();
+                    out.open((dir + "/" + line.substr(16)).c_str());
+                    continue;
+                }
+                if (out.is_open()) out << line << "\n";
+            }
+            std::printf("settings restored from %s\n", argv[i + 1]);
+        }
+    }
     if (!fresh) {
         store.load(error);
         applyStore(store, o);
@@ -213,6 +253,7 @@ int main(int argc, char** argv) {
     switch (o.source) {
         case app::SourceKind::Demo: source = app::makeDemoSource(o.sampleRate, o.radio.frequency); break;
         case app::SourceKind::Tcp: source = app::makeTcpSource(o.tcp); break;
+        case app::SourceKind::SdrConnect: source = app::makeSdrConnectSource(o.sdrconnect); break;
         case app::SourceKind::File: source = app::makeFileSource(o.file, o.sampleRate, o.fileCenter); break;
         default: source = app::makeRtlSource(o.device); break;
     }
@@ -223,6 +264,10 @@ int main(int argc, char** argv) {
     if (!radio.start(o.radio, error)) {
         std::fprintf(stderr, "offgrid: %s\n", error.c_str());
         return 1;
+    }
+    if (o.upconverter > 0) {
+        radio.setUpconverter(o.upconverter);
+        store.setNumber("upconverter", o.upconverter);
     }
     if (!o.locator.empty()) {
         radio.setLocator(o.locator);
@@ -246,6 +291,7 @@ int main(int argc, char** argv) {
         radio.setMode(plan.mode);
         if (plan.bandwidth > 0) radio.setBandwidth(plan.bandwidth);
         radio.setDecoderShift(plan.shift);
+        radio.setCenterOnDial(plan.centerOnDial);
         radio.setDecoder(true, kind, plan.setup);
     }
 

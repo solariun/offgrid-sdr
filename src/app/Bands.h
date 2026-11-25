@@ -44,6 +44,16 @@ const std::vector<Band>& bands();
 // The band containing `hz` (the narrowest one), or nullptr.
 const Band* bandAt(double hz);
 
+// DAB Band III channels (5A ... 13F), name and centre frequency (Hz).
+struct DabChannel {
+    const char* name;
+    double hz;
+};
+const std::vector<DabChannel>& dabChannels();
+// The channel at (within 1 kHz of) hz, or nullptr; the nearest channel.
+const DabChannel* dabChannelAt(double hz);
+const DabChannel& dabNearest(double hz);
+
 // "145.800.000" style (MHz . kHz . Hz groups) and "145.8 MHz" short form.
 std::string formatFrequency(double hz);
 std::string formatShort(double hz);
