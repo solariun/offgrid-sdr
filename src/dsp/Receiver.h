@@ -167,8 +167,20 @@ public:
     // wallClockStart (optional): the computer's time (Unix seconds) of the
     // audio's first sample; the station then plays in step with the clock
     // (each rebuild starts it at the sample for "now"), e.g. time signals.
+    // mode AM: `audio` is the envelope itself (the carrier's amplitude,
+    // 0 = off .. 2), e.g. gate * (1 + 0.8 * programme) for ACARS bursts.
     void addAudioStation(double hz, const std::vector<float>& audio, double audioRate, double levelDb, Mode mode,
                          const std::string& name, double wallClockStart = 0);
+
+    // Short complex bursts (digital modes sent as IQ: VDL2, AIS ...): each
+    // burst's baseband samples at burstRate, centred on `hz`, start `at`
+    // seconds into a loop of loopSeconds.  Silent between bursts.
+    struct Burst {
+        double at;
+        std::vector<Complex> iq;
+    };
+    void addBurstStation(double hz, const std::vector<Burst>& bursts, double burstRate, double loopSeconds, double levelDb,
+                         const std::string& name);
 
     // Next `n` samples (with noise), as unsigned 8-bit IQ like a stick, so
     // the whole chain is exercised.

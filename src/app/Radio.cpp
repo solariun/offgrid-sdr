@@ -19,6 +19,12 @@
 // ============================================================================
 #include "Radio.h"
 
+#include "../decoders/Ais.h"
+#include "../decoders/Ax25.h"
+#include "../decoders/Callsign.h"
+#include "../decoders/Ft8.h"
+#include "../decoders/Wspr.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -68,10 +74,16 @@ Radio::Radio(std::unique_ptr<Source> source, std::unique_ptr<audio::AudioOutput>
       flushAudio_(false),
       center_(0),
       running_(false),
+      jobsDropped_(0),
+      decoderActive_(false),
+      decoderIq_(false),
+      decoderOn_(false),
       decoderWanted_(false),
       decoderDirty_(false),
       decoderReset_(false),
       decoderKind_(dec::Kind::Cw),
+      clockOffset_(0),
+      ftxPending_(false),
       wav_(0),
       wavFrames_(0) {}
 
@@ -106,12 +118,15 @@ bool Radio::start(const RadioSettings& s, std::string& error) {
     }
     running_ = true;
     thread_ = std::thread(&Radio::loop, this);
+    decoderThread_ = std::thread(&Radio::decoderLoop, this);
     return true;
 }
 
 void Radio::stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    jobReady_.notify_all();
+    if (decoderThread_.joinable()) decoderThread_.join();
     stopRecording();
     if (source_) source_->stop();
     if (audio_) audio_->close();
@@ -220,6 +235,8 @@ void Radio::setDecoder(bool on, dec::Kind kind, std::function<void(dec::Decoder&
     decoderWanted_ = on;
     decoderKind_ = kind;
     decoderSetup_ = setup;
+    decoderIq_ = kind == dec::Kind::Ais || kind == dec::Kind::Vdl2;
+    decoderActive_ = on;
     decoderDirty_ = true;
 }
 
@@ -227,6 +244,34 @@ void Radio::setDecoderShift(double hz) {
     std::lock_guard<std::mutex> lock(mutex_);
     settings_.decoderShift = hz;
     receiverDirty_ = true;
+}
+
+void Radio::setClockOffset(double pcMinusTrue) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    clockOffset_ = pcMinusTrue;
+}
+
+void Radio::setLocator(const std::string& grid) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    locator_ = grid;
+    double lat, lon;
+    if (dec::Locator::toLatLon(grid, lat, lon)) heard_.setHomeLatLon(lat, lon);
+    decoderReset_ = true;  // the decoder gets it at its next setup
+}
+
+bool Radio::takeFtxTimings(std::string& proto, std::vector<double>& dts) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!ftxPending_) return false;
+    ftxPending_ = false;
+    proto = ftxProto_;
+    dts.swap(ftxDts_);
+    ftxDts_.clear();
+    return true;
+}
+
+std::string Radio::heardText(double now, double windowSeconds, bool details) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return heard_.text(now, windowSeconds, details);
 }
 
 void Radio::resetDecoder() {
@@ -330,6 +375,126 @@ void Radio::writeWav(const std::vector<float>& audio) {
     wavFrames_ += audio.size() / 2;
 }
 
+// ----------------------------------------------------------- decoder thread --
+
+void Radio::decoderLoop() {
+    std::string text;
+    std::vector<std::vector<float> > columns;
+    std::vector<dec::PictureLine> lines;
+    while (running_) {
+        DecoderJob job;
+        bool have = false;
+        {
+            std::unique_lock<std::mutex> lock(jobMutex_);
+            jobReady_.wait_for(lock, std::chrono::milliseconds(100), [this] { return !jobs_.empty() || !running_; });
+            if (!jobs_.empty()) {
+                job.audio.swap(jobs_.front().audio);
+                job.iq.swap(jobs_.front().iq);
+                job.audioRate = jobs_.front().audioRate;
+                job.iqRate = jobs_.front().iqRate;
+                job.timestamp = jobs_.front().timestamp;
+                job.clockOffset = jobs_.front().clockOffset;
+                job.dial = jobs_.front().dial;
+                job.center = jobs_.front().center;
+                jobs_.pop_front();
+                have = true;
+            }
+        }
+        // Create / replace / reset the decoder as asked.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (decoderDirty_) {
+                decoderDirty_ = false;
+                decoderReset_ = false;
+                decoder_.reset();
+                if (decoderWanted_) {
+                    decoder_ = dec::makeDecoder(decoderKind_);
+                    if (decoder_ && decoderSetup_) decoderSetup_(*decoder_);
+                    double lat, lon;
+                    if (decoder_ && dec::Locator::toLatLon(locator_, lat, lon)) {
+                        if (dec::FtxDecoder* f = dynamic_cast<dec::FtxDecoder*>(decoder_.get())) f->setHomeLatLon(lat, lon);
+                        if (dec::AisDecoder* a = dynamic_cast<dec::AisDecoder*>(decoder_.get())) a->setHome(lat, lon);
+                        if (dec::Ax25Decoder* x = dynamic_cast<dec::Ax25Decoder*>(decoder_.get())) x->setHome(lat, lon);
+                    }
+                }
+                decoderOn_ = decoder_ != 0;
+                decStatus_ = dec::Status();
+            }
+            if (decoderReset_) {
+                decoderReset_ = false;
+                if (decoder_) {
+                    decoder_->reset();
+                    if (decoderSetup_) decoderSetup_(*decoder_);  // settings that reset() may clear
+                }
+            }
+        }
+        if (!have || !decoder_) continue;
+        // WSPR reports RF frequencies and the stick's error from the dial.
+        dec::WsprDecoder* wspr = dynamic_cast<dec::WsprDecoder*>(decoder_.get());
+        dec::FtxDecoder* ftx = dynamic_cast<dec::FtxDecoder*>(decoder_.get());
+        if (wspr) wspr->setDialFrequency(job.dial);
+        if (ftx) ftx->setDial(job.dial);
+        decoder_->setTimestamp(job.timestamp);
+        decoder_->setClockOffset(job.clockOffset);
+        if (decoder_->wantsIq()) {
+            if (!job.iq.empty()) decoder_->processIq(&job.iq[0], job.iq.size(), job.iqRate, job.center, job.dial);
+        } else if (!job.audio.empty()) {
+            decoder_->process(&job.audio[0], job.audio.size(), job.audioRate);
+        }
+        text.clear();
+        lines.clear();
+        columns.clear();
+        if (decoder_->hasPicture()) decoder_->takeLines(lines);
+        decoder_->takeText(text);
+        if (decoder_->hasImage()) decoder_->takeColumns(columns);
+        dec::Status st = decoder_->status();
+        // FT8 / FT4 / WSPR: decodes to the Heard list, slot timings to the clock.
+        std::vector<dec::FtxDecode> ftxDecodes;
+        std::vector<dec::WsprDecode> wsprDecodes;
+        std::vector<double> dts;
+        std::string proto;
+        bool timings = false;
+        if (ftx) {
+            ftx->takeDecodes(ftxDecodes);
+            timings = ftx->takeSlotTimings(dts);
+            proto = ftx->protoName();
+        }
+        if (wspr) {
+            wspr->takeDecodes(wsprDecodes);
+            if (wspr->newSlotDone()) {
+                dts = wspr->lastSlotDts();
+                timings = !dts.empty();
+                proto = "WSPR";
+            }
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        decStatus_ = st;
+        for (size_t i = 0; i < ftxDecodes.size(); ++i) {
+            const dec::FtxDecode& d = ftxDecodes[i];
+            if (!d.caller.empty()) heard_.note(d.slotTime, job.dial, d.proto, d.caller, d.gridFromEarlier ? "" : d.grid, d.snr);
+        }
+        for (size_t i = 0; i < wsprDecodes.size(); ++i)
+            heard_.note(wsprDecodes[i].slotStart, job.dial, "WSPR", wsprDecodes[i].call, wsprDecodes[i].grid, wsprDecodes[i].snrDb);
+        if (timings) {
+            ftxProto_ = proto;
+            ftxDts_ = dts;
+            ftxPending_ = true;
+        }
+        if (!text.empty()) {
+            decText_ += text;
+            if (decText_.size() > 65536) decText_.erase(0, decText_.size() - 65536);
+        }
+        if (!lines.empty()) {
+            decLines_.insert(decLines_.end(), lines.begin(), lines.end());
+            if (decLines_.size() > 8000) decLines_.erase(decLines_.begin(), decLines_.end() - 8000);
+        }
+        if (!columns.empty()) {
+            decColumns_.insert(decColumns_.end(), columns.begin(), columns.end());
+            if (decColumns_.size() > 4000) decColumns_.erase(decColumns_.begin(), decColumns_.end() - 4000);
+        }
+    }
+}
+
 // --------------------------------------------------------------------- loop --
 
 void Radio::loop() {
@@ -357,22 +522,6 @@ void Radio::loop() {
                 audio_->flush();
                 flushAudio_ = false;
             }
-            if (decoderDirty_) {
-                decoderDirty_ = false;
-                if (decoderWanted_) {
-                    decoder_ = dec::makeDecoder(decoderKind_);
-                    if (decoder_ && decoderSetup_) decoderSetup_(*decoder_);
-                }
-                else decoder_.reset();
-                decoderReset_ = false;
-            }
-            if (decoderReset_) {
-                decoderReset_ = false;
-                if (decoder_) {
-                    decoder_->reset();
-                    if (decoderSetup_) decoderSetup_(*decoder_);  // settings that reset() may clear
-                }
-            }
         }
         // Overload: count samples at the very ends of the 8-bit range.
         for (size_t i = 0; i < block.size(); i += 16) {
@@ -391,22 +540,43 @@ void Radio::loop() {
             std::lock_guard<std::mutex> lock(mutex_);
             writeWav(audio);
         }
-        // The decoder listens to the receiver's tap (before squelch / volume).
-        std::string text;
-        std::vector<std::vector<float> > columns;
-        std::vector<dec::PictureLine> lines;
-        dec::Status decStatus;
-        if (decoder_) {
-            const std::vector<float>& tap = receiver_->decoderAudio();
-            // The computer's clock at this block's first sample (time
-            // decoders): when the block arrived (= its last sample), minus
-            // its length.  The receiver's filters add a few ms (constant).
-            decoder_->setTimestamp(arrived - static_cast<double>(iq.size()) / source_->sampleRate());
-            if (!tap.empty()) decoder_->process(&tap[0], tap.size(), audio_->rate());
-            if (decoder_->hasPicture()) decoder_->takeLines(lines);
-            decoder_->takeText(text);
-            if (decoder_->hasImage()) decoder_->takeColumns(columns);
-            decStatus = decoder_->status();
+        // The decoder (on its own thread) gets the receiver's tap (before
+        // squelch / volume), or the stick's samples for IQ decoders.
+        if (decoderActive_) {
+            DecoderJob job;
+            if (decoderIq_) job.iq = iq;
+            else job.audio = receiver_->decoderAudio();
+            job.audioRate = audio_->rate();
+            job.iqRate = rate;
+            // The computer's clock at this block's first sample: when it
+            // arrived (= its last sample), minus its length.
+            job.timestamp = arrived - static_cast<double>(iq.size()) / rate;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                job.clockOffset = clockOffset_;
+                job.dial = settings_.frequency;
+            }
+            job.center = center_;
+            {
+                std::lock_guard<std::mutex> lock(jobMutex_);
+                // ~2 s of work at most: a decoder that falls behind loses the
+                // oldest blocks (counted) rather than the radio stalling.
+                const size_t maxJobs = static_cast<size_t>(2.0 * rate / std::max<size_t>(1, iq.size())) + 1;
+                while (jobs_.size() >= maxJobs) {
+                    jobs_.pop_front();
+                    ++jobsDropped_;
+                }
+                jobs_.push_back(DecoderJob());
+                jobs_.back().audio.swap(job.audio);
+                jobs_.back().iq.swap(job.iq);
+                jobs_.back().audioRate = job.audioRate;
+                jobs_.back().iqRate = job.iqRate;
+                jobs_.back().timestamp = job.timestamp;
+                jobs_.back().clockOffset = job.clockOffset;
+                jobs_.back().dial = job.dial;
+                jobs_.back().center = job.center;
+            }
+            jobReady_.notify_one();
         }
 
         Clock::time_point end = Clock::now();
@@ -428,21 +598,9 @@ void Radio::loop() {
         if (settings_.mode == dsp::Mode::WFM) snap_.rds = receiver_->rds();
         else snap_.rds = dsp::RdsInfo();
         snap_.carrierHz = receiver_->carrierOffsetHz();
-        snap_.decoderOn = decoder_ != 0;
-        snap_.decoderKind = decoder_ ? decoder_->kind() : decoderKind_;
-        snap_.decoder = decStatus;
-        if (!text.empty()) {
-            decText_ += text;
-            if (decText_.size() > 65536) decText_.erase(0, decText_.size() - 65536);
-        }
-        if (!lines.empty()) {
-            decLines_.insert(decLines_.end(), lines.begin(), lines.end());
-            if (decLines_.size() > 8000) decLines_.erase(decLines_.begin(), decLines_.end() - 8000);
-        }
-        if (!columns.empty()) {
-            decColumns_.insert(decColumns_.end(), columns.begin(), columns.end());
-            if (decColumns_.size() > 4000) decColumns_.erase(decColumns_.begin(), decColumns_.end() - 4000);
-        }
+        snap_.decoderOn = decoderOn_;
+        snap_.decoderKind = decoderKind_;
+        snap_.decoder = decStatus_;
         snap_.audioQueued = audio_->queuedSeconds();
         snap_.audioUnderruns = audio_->underruns();
         snap_.samplesDropped = source_->queue().dropped();

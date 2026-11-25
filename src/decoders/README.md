@@ -1,6 +1,6 @@
 # liboffgrid-decoders — radio text and picture decoders in C++11
 
-Ten decoders behind one interface, each also usable alone through its own
+Sixteen decoders behind one interface, each also usable alone through its own
 header. Input: mono demodulated audio (any rate from 8 kHz up). Output: text
 (pictures for fax and SSTV, columns for Hellschreiber, the time and the PC clock's error for time signals). No threads, no devices, no terminal:
 the standard library and liboffgrid-dsp's FFT only.
@@ -17,13 +17,26 @@ the standard library and liboffgrid-dsp's FFT only.
 | SSTV | `Sstv.h` | `dec::SstvDecoder` | slow-scan TV by VIS code: Martin M1/M2, Scottie S1/S2, PD90, PD120, with drift correction |
 | Time signals | `Time.h` | `dec::TimeDecoder` | CHU (FSK code), WWV and WWVH (100 Hz BCD code, told apart by their ticks), RWM (minute marker): the time and the PC clock's error to ±2.5 ms |
 | Clock | `Clock.h` | `dec::ClockCorrection` | the corrected time: offset, source, history, the PC clock's drift from two readings, save/load |
+| ACARS | `Acars.h` | `dec::AcarsDecoder` | aircraft messages: 2400 bd MSK on AM audio; registration, flight, label (with its meaning), text; the parser is shared with VDL2 |
+| VDL2 | `Vdl2.h` | `dec::Vdl2Decoder` | VHF Data Link Mode 2 from IQ: every channel 136.6–137 MHz at once; D8PSK, Reed-Solomon, AVLC; aircraft and ground addresses with countries, ACARS over AVLC |
+| AIS | `Ais.h` | `dec::AisDecoder` | ships from IQ, both channels at once: positions, static/voyage data, class B, aids to navigation, base stations; a vessel table and `!AIVDM` sentences |
+| FT8 / FT4 | `Ft8.h` (`Ftx.h`) | `dec::Ft8Decoder`, `dec::Ft4Decoder` | 15 s / 7.5 s slots by the corrected clock, every 77-bit message type, LDPC, up to three subtract-and-decode passes; country, distance and bearing of the caller; slot timings for the clock |
+| WSPR | `Wspr.h` | `dec::WsprDecoder` | 2-minute slots, Fano decoder, about −28 dB; finds stations with the clock a minute out; measures the clock and the stick's frequency error |
+| Callsigns, locators | `Callsign.h` | `dec::countryOf`, `dec::Locator` | offline callsign → country (ITU prefixes and areas), Maidenhead ↔ lat/lon, distance and bearing, 620 cities |
+| Heard | `Heard.h` | `dec::HeardList` | every FT8/FT4/WSPR decode, band by band: stations, countries, farthest, open directions, trend |
 | AX.25 / APRS | `Ax25.h` | `dec::Ax25Decoder` | packet radio: AFSK 1200 (VHF), AFSK 300 (HF), G3RUH 9600; frames with digipeater paths; APRS positions (plain, compressed, Mic-E), weather, messages, status, objects, items, telemetry |
 
 Signal generators for each (tests, demos, training): `FskEncoders.h` (namespace
 `dec::enc`: CW, RTTY, NAVTEX, DSC, noise), `PskEncoders.h` (`synthPsk`, `synthHell`),
 `PictureEncoders.h` (fax and SSTV transmissions, test pictures), `TimeEncoders.h`
-(CHU, WWV, WWVH, RWM at any UTC time) and `Ax25Encoders.h` (AX.25 frames, AFSK/G3RUH
-audio, the demo APRS packets). Shared code tables: `Codes.h`.
+(CHU, WWV, WWVH, RWM at any UTC time), `Ax25Encoders.h` (AX.25 frames, AFSK/G3RUH
+audio, the demo APRS packets), `AviationEncoders.h` (ACARS audio, VDL2 bursts),
+`AisEncoders.h` (AIS messages and GMSK bursts), `Ftx.h` (FT8/FT4 synthesis) and
+`WsprEncoders.h` (WSPR transmissions).
+
+FT8/FT4 follow [ft8_lib](https://github.com/kgoba/ft8_lib) by Kārlis Goba (MIT); WSPR
+follows WSJT-X's wsprd (K1JT) and KA9Q's Fano decoder; ACARS follows acarsdec and
+VDL2 dumpvdl2, as the browser version credits. Shared code tables: `Codes.h`.
 
 The AX.25 modem, HDLC and frame code in `ax25/` come from
 [AX25Toolkit](https://github.com/solariun/AX25Toolkit) (Gustavo Campos), whose DSP
@@ -68,8 +81,11 @@ Demodulate in USB with the dial below the signal by the decoder's
 | AX.25 300 | 1600/1800 Hz | F (the listed dial) in USB |
 | CW | the tone anywhere 300–1200 Hz | the CW mode's pitch |
 
-Time decoders also need `setTimestamp(unix seconds)` before each `process()`: the
-computer's clock at the block's first sample. Picture decoders give
+Time and slot decoders (TIME, FT8, FT4, WSPR) also need `setTimestamp(unix seconds)`
+before each `process()`: the computer's clock at the block's first sample; slot
+decoders also `setClockOffset()`. IQ decoders (AIS, VDL2: `wantsIq()`) take
+`processIq(iq, n, rate, centerHz, dialHz)` instead of audio. Slot decoders do about
+0.2–0.8 s of work at each slot's end: call them from a thread of their own. Picture decoders give
 `dec::PictureLine`s through `takeLines()` (a new picture number = a new picture).
 
 ## Tests
@@ -77,7 +93,9 @@ computer's clock at the block's first sample. Picture decoders give
 `make test` runs `tests/test_decoders_fsk.cpp` (CW, RTTY, NAVTEX, DSC),
 `tests/test_decoders_psk.cpp` (PSK, Hell), `tests/test_decoders_picture.cpp` (fax,
 SSTV), `tests/test_decoders_time.cpp` (time signals, clock) and
-`tests/test_decoders_ax25.cpp` (AX.25, APRS): exact text from the encoders at 48
+`tests/test_decoders_ax25.cpp` (AX.25, APRS), `tests/test_decoders_aviation.cpp`
+(ACARS, VDL2), `tests/test_decoders_ais.cpp`, `tests/test_decoders_ftx.cpp` (FT8, FT4,
+callsigns, Heard) and `tests/test_decoders_wspr.cpp`: exact text from the encoders at 48
 and 12 kHz in noise, no false text on noise alone, reset, NaN recovery, speed
 and tone search, and the CPU cost (every decoder runs hundreds of times faster
 than real time).

@@ -323,6 +323,37 @@ struct AudioUsbEnvelope : Envelope {
     }
 };
 
+// A real envelope from a buffer (AM stations whose programme is given as
+// the carrier's amplitude), looped and resampled.
+struct BufferAmEnvelope : Envelope {
+    LoopAudio audio;
+    BufferAmEnvelope(const std::vector<float>& env, double srcRate, double envRate, double startPos)
+        : audio(env, srcRate, envRate, startPos) {}
+    Complex next() { return Complex(audio.next(), 0.0f); }
+};
+
+// Complex bursts at given times in a loop (zero between them).
+struct BurstEnvelope : Envelope {
+    std::vector<DemoSource::Burst> bursts;  // sorted by start
+    double burstRate, loop, t, dt;
+    BurstEnvelope(const std::vector<DemoSource::Burst>& b, double rate, double loopSeconds, double envRate)
+        : bursts(b), burstRate(rate), loop(loopSeconds > 0 ? loopSeconds : 1), t(0), dt(1.0 / envRate) {}
+    Complex next() {
+        Complex v(0.0f, 0.0f);
+        for (std::size_t k = 0; k < bursts.size(); ++k) {
+            const double pos = (t - bursts[k].at) * burstRate;
+            if (pos < 0 || pos + 1 >= bursts[k].iq.size()) continue;
+            const std::size_t i = static_cast<std::size_t>(pos);
+            const float f = static_cast<float>(pos - i);
+            v = bursts[k].iq[i] * (1.0f - f) + bursts[k].iq[i + 1] * f;
+            break;
+        }
+        t += dt;
+        if (t >= loop) t -= loop;
+        return v;
+    }
+};
+
 // ---- Stations ------------------------------------------------------------------
 struct Station {
     virtual ~Station() {}
@@ -474,6 +505,8 @@ struct DemoSource::Impl {
         Mode mode;
         std::string name;
         double wallStart;  // 0, or the Unix time of audio[0] (clock-locked)
+        std::vector<DemoSource::Burst> bursts;  // burst stations (audioRate = burst rate)
+        double loop;
     };
     std::vector<Extra> extras;  // added with addAudioStation(); placed by build()
 
@@ -583,7 +616,13 @@ struct DemoSource::Impl {
             if (x.wallStart > 0)
                 startPos = (std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() - x.wallStart) *
                            x.audioRate;
-            if (x.mode == Mode::NFM)  // the audio frequency-modulates the carrier (5 kHz per unit)
+            if (!x.bursts.empty())
+                gens.push_back(new EnvelopeStation(fs, x.hz - center, dbToLin(x.levelDb), dAud,
+                                                   new BurstEnvelope(x.bursts, x.audioRate, x.loop, fs / dAud)));
+            else if (x.mode == Mode::AM)  // the buffer is the envelope
+                gens.push_back(new EnvelopeStation(fs, x.hz - center, dbToLin(x.levelDb), dAud,
+                                                   new BufferAmEnvelope(x.audio, x.audioRate, fs / dAud, startPos)));
+            else if (x.mode == Mode::NFM)  // the audio frequency-modulates the carrier (5 kHz per unit)
                 gens.push_back(new FmStation(fs, x.hz - center, dbToLin(x.levelDb), dAud, 5000.0, 0,
                                              new LoopAudio(x.audio, x.audioRate, fs / dAud, startPos)));
             else
@@ -631,6 +670,21 @@ void DemoSource::setCenter(double centerHz) {
 
 const std::vector<DemoStation>& DemoSource::stations() const { return impl_->list; }
 
+void DemoSource::addBurstStation(double hz, const std::vector<Burst>& bursts, double burstRate, double loopSeconds,
+                                 double levelDb, const std::string& name) {
+    Impl::Extra x;
+    x.hz = hz;
+    x.audioRate = burstRate;
+    x.levelDb = levelDb;
+    x.mode = Mode::USB;
+    x.name = name;
+    x.wallStart = 0;
+    x.bursts = bursts;
+    x.loop = loopSeconds;
+    impl_->extras.push_back(x);
+    impl_->build();
+}
+
 void DemoSource::addAudioStation(double hz, const std::vector<float>& audio, double audioRate, double levelDb, Mode mode,
                                  const std::string& name, double wallClockStart) {
     Impl::Extra x;
@@ -641,6 +695,7 @@ void DemoSource::addAudioStation(double hz, const std::vector<float>& audio, dou
     x.mode = mode;
     x.name = name;
     x.wallStart = wallClockStart;
+    x.loop = 0;
     impl_->extras.push_back(x);
     impl_->build();
 }

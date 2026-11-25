@@ -21,6 +21,10 @@
 //                      144.390); below: USB, 300 Bd, dial on the listed dial
 //    TIME              USB, dial 1 kHz below the station; the station from
 //                      the frequency (CHU, WWV, RWM)
+//    ACARS             AM on the channel (131.550, 131.725, 131.825 ...)
+//    VDL2              IQ: the stick's span covers 136.6-137 MHz (dial 136.8)
+//    AIS               IQ: both channels (dial 162.000, between them)
+//    FT8, FT4, WSPR    USB, 3 kHz, the dial on the listed frequency
 //  The interface (Ui) and the headless mode (main) both use it.
 // ============================================================================
 #ifndef OFFGRID_APP_DECODERPLAN_H

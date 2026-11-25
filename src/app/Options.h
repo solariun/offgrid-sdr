@@ -46,6 +46,7 @@ struct Options {
     std::string wav;         // --wav out.wav: record the demodulated sound
     std::string decoder;     // --decoder cw|rtty|psk|navtex|dsc|hell
     bool fresh;              // --fresh: ignore the saved settings
+    std::string locator;     // --locator GRID (e.g. JO21): distances and bearings
 };
 
 // Parses argv into opts.  Returns "" or an error message.

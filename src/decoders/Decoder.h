@@ -45,6 +45,11 @@
 //    SSTV    1500 .. 2300 Hz video, 1200 Hz sync, VIS 1100/1300 Hz (the dial ON
 //            the listed frequency: USB, but LSB on the 40/80/160 m ham bands
 //            (7.171, 3.845 MHz), narrowband FM above 30 MHz (ISS 145.800))
+//    ACARS   AM audio (2400 bd MSK, 1200/2400 Hz) on 129-137 MHz channels
+//    VDL2    IQ: every 25 kHz channel 136.6-137 MHz in view (processIq)
+//    AIS     IQ: both channels, 161.975 and 162.025 MHz (processIq)
+//    FT8/FT4 USB audio 200-3000 Hz, dial on the listed FT8/FT4 frequency
+//    WSPR    USB audio 1400-1600 Hz, dial on the listed WSPR dial frequency
 //    TIME    the carrier at 1000 Hz, found anywhere 700-1300 Hz (dial 1 kHz
 //            below the station; CHU's code needs audio to ~3.3 kHz; Time.h)
 //    AX25    packet/APRS: 1200 Bd AFSK 1200/2200 Hz in NFM audio, dial on the
@@ -60,6 +65,7 @@
 #ifndef OFFGRID_DECODERS_DECODER_H
 #define OFFGRID_DECODERS_DECODER_H
 
+#include <complex>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -67,7 +73,7 @@
 
 namespace dec {
 
-enum class Kind { Cw, Rtty, Psk, Navtex, Dsc, Hell, Fax, Sstv, Time, Ax25 };
+enum class Kind { Cw, Rtty, Psk, Navtex, Dsc, Hell, Fax, Sstv, Time, Ax25, Acars, Vdl2, Ais, Ft8, Ft4, Wspr };
 const char* kindName(Kind kind);  // "CW", "RTTY", "PSK", "NAVTEX", "DSC", "HELL", "FAX", "SSTV", "TIME"
 bool parseKind(const std::string& name, Kind& kind);  // case-insensitive
 
@@ -140,6 +146,23 @@ public:
     // sample of the next process() call.  Programs call it before every
     // process(); other decoders ignore it.
     virtual void setTimestamp(double unixSeconds) { (void)unixSeconds; }
+    // Slot-based decoders (FT8, FT4, WSPR): the clock correction in use,
+    // seconds (PC time - true time, the sign of dec::ClockCorrection), so
+    // their slots follow the true time.
+    virtual void setClockOffset(double pcMinusTrue) { (void)pcMinusTrue; }
+
+    // IQ decoders (AIS, VDL2): they take the stick's complex samples instead
+    // of audio (several channels at once).  Programs call processIq() for
+    // these (process() is then not used): iq at `rate`, the stick's centre
+    // frequency `centerHz`, and where the user is tuned, `dialHz`.
+    virtual bool wantsIq() const { return false; }
+    virtual void processIq(const std::complex<float>* iq, std::size_t n, double rate, double centerHz, double dialHz) {
+        (void)iq;
+        (void)n;
+        (void)rate;
+        (void)centerHz;
+        (void)dialHz;
+    }
 };
 
 // A decoder of the given kind with its default settings.

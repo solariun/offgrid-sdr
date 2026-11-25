@@ -1,4 +1,4 @@
-# OFFgrid-SDR TUI — Specification (SDD), v0.3.0
+# OFFgrid-SDR TUI — Specification (SDD), v0.4.0
 
 **What it is.** `offgrid` is a C++11 port of OFFgrid-SDR, the single-file browser receiver by diddy-boy, to a
 **text terminal on Linux and macOS**. It drives an RTL-SDR stick through **its own driver** (no librtlsdr, no
@@ -8,7 +8,7 @@ mode buttons, lights, S-meter, spectrum, waterfall, band list, controls, RDS, st
 painter and a widget toolkit (§9). It builds into **one binary with no third-party libraries**: fully static on
 Linux, OS libraries only on macOS (§0.2 D6).
 
-**Status (2026-11-25): phases 1 (`46da55f`), 2 (`254ddd6`) and 3 committed.**
+**Status (2026-11-25): phases 1 (`46da55f`), 2 (`254ddd6`) and 3 (`0f92db6`) committed; phase 4 built, measured and committed.** Phase 4 adds ACARS, VDL2, AIS, FT8, FT4, WSPR, offline callsign/locator tools, the Heard list, a decoder thread (D18) and `--locator`. **First live data decode:** VDL2 from a real aircraft (E33).
 Phase 3 adds weather fax, SSTV, time signals with the clock correction, AX.25/APRS (on Gustavo's AX25Toolkit, brought
 forward from phase 4 at his request), PNG pictures, and full mouse use (D14). Phase 2 adds
 six decoders (CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber), memories, frequency labels, a logbook, a settings
@@ -33,6 +33,7 @@ file and the code disagree, the disagreement is a defect to be resolved here fir
 |---|---|
 | 2026-11-25 | **Phase 1 written**: `src/usb`, `src/rtlsdr`, `src/dsp`, `src/audio`, `src/app`, `tools/rtl-probe.cpp`, `tests/test_dsp.cpp`, `Makefile`, `TUI.md`, this file; Graphicx added as the submodule `external/Graphicx`; README.MD points to TUI.md. |
 | 2026-11-25 | **Graphicx extended** (Graphicx `c06f4d5`, the submodule's commit): `color.h` (colormaps, themes), `canvas.h` (pixel drawing, two fonts), `ui.h` (Surface, Painter, DotCanvas, Display, layout), `widgets.h` (App and ~25 widgets), events and mouse in `terminal.h`; `tests/test_ui.cpp` (124 checks), `examples/canvas.cpp`, `examples/dashboard.cpp`. The existing picture API is unchanged (its 62 checks still pass). |
+| 2026-11-25 | **Phase 4**: `src/decoders/Acars.*`, `Vdl2.*`, `AviationEncoders.*`, `Ais.*`, `AisEncoders.*`, `Ftx.*`, `Ft8.*`, `Callsign.*`, `Heard.*`, `Wspr.*`, `WsprEncoders.*`; tests `test_decoders_aviation.cpp`, `test_decoders_ais.cpp`, `test_decoders_ftx.cpp`, `test_decoders_wspr.cpp`; Decoder.h gains `Kind::Acars/Vdl2/Ais/Ft8/Ft4/Wspr`, `wantsIq`/`processIq` and `setClockOffset`; Radio runs decoders on a worker thread with a bounded job queue (D18), keeps the Heard list, hands FT8/FT4/WSPR slot timings to the clock, passes the dial and the locator; DemoSource gains AM-envelope and burst stations; the demo band gains ACARS, VDL2, AIS, FT8, FT4 and WSPR stations; the Ui gains the Heard tab; options `--locator`. |
 | 2026-11-25 | **Phase 3** (Graphicx `b03690b`): `src/decoders/Fax.*`, `Sstv.*`, `PictureEncoders.*`, `Time.*`, `Clock.*`, `TimeEncoders.*`, `Ax25.*`, `Ax25Aprs.cpp`, `Ax25Encoders.*`, `ax25/` (modem, HDLC, frames from AX25Toolkit); tests `test_decoders_picture.cpp`, `test_decoders_time.cpp`, `test_decoders_ax25.cpp`; `src/app/DecoderPlan.*`; Decoder.h gains `Kind::Fax/Sstv/Time/Ax25`, `PictureLine`, `takeLines`, `setTimestamp` and the picture/time fields of `Status`; SampleQueue stamps each block's arrival time; Radio gains a decoder setup hook and picture lines; the demo band gains fax, SSTV, CHU, WWV and APRS (NFM) stations; the Ui gains the toolbar, prompt buttons, frequency-display mouse actions, the picture panel with PNG saving and the corrected clock; headless saves pictures. Graphicx gains `png.h` (PNG writer with its own deflate). |
 | 2026-11-25 | Defects found in phase 3 and fixed the same day: the toolbar built in `stopDecoder()` instead of `build()` (an edit landed at the wrong match); the prompt's button row on its border (5 rows, now 6); time decoders saw the computer's clock +0.13–0.15 s late (timestamped when processed and the demo's code made before it started: now stamped on arrival and built at start, E28); the stick overloaded on 144.8 MHz with automatic gain (E30). |
 | 2026-11-25 | **Phase 2**: `src/decoders` (liboffgrid-decoders: `Decoder.h` interface + factory, `Cw`, `Rtty`, `Psk`, `Navtex` (+DSC), `Hell`, `Codes`, `FskEncoders`, `PskEncoders`), `tests/test_decoders_fsk.cpp`, `tests/test_decoders_psk.cpp`; `src/app/Store.*`; `examples/fm-radio.cpp`, `examples/decode.cpp`; a README per library; Receiver gains `decoderAudio()` and `carrierOffsetHz()`; DemoSource gains `addAudioStation()` and the demo band carries decoder stations; Radio gains the decoder and the decoder shift (D12); Ui gains the decoder panel, list tabs, prompts, scan, calibration, labels; Makefile builds the libraries. |
@@ -86,6 +87,8 @@ problems (**P**), §12 the plan for the next phases, §13 the glossary. "As buil
 | D15 | **AX.25 from AX25Toolkit.** The modem (Dire Wolf-derived), HDLC and frame code are copied into `src/decoders/ax25/` with their headers, adapted minimally (namespaces, float input, multi-slicer, two undefined-behaviour fixes); APRS interpretation ported from the browser version. | Gustavo: "also add the ax25 decoding you can also use the AX25ToolKit from my repos". AX25Toolkit has no LICENSE file (P16); Dire Wolf is GPL-2.0-or-later, compatible with D3. |
 | D16 | **Pictures are saved as PNG** where offgrid was started (`offgrid-FAX-…png`, `offgrid-SSTV-…png`), when the next picture starts, the decoder stops or the program ends; also headless. | The browser version archives fax charts; PNG via Graphicx's own encoder keeps D5. |
 | D17 | **The clock correction is kept in `clock.txt`** (`dec::ClockCorrection::save()`), with the JS sign (offset = PC − true); **T** sets it from a full time code. | Same rules as the browser version (drift from two readings ≥ 0.5 day apart). |
+| D18 | **Decoders run on their own thread.** The DSP thread queues each block's decoder input (audio tap or IQ, timestamp, clock offset, dial, centre); the worker creates/resets the decoder and publishes text, pictures, status, Heard notes and slot timings under the Radio mutex. The queue holds about 2 s; older jobs are dropped and counted. | FT8/WSPR slot decodes take 0.2–0.8 s of CPU; on the DSP thread they would stall the sound and overflow the 0.5 s sample queue. |
+| D19 | **FT8/FT4/WSPR slot timings correct the clock automatically** (ClockCorrection::applyFtxTimings), as the browser version does. | Same behaviour as the browser version. |
 | D10 | **No Linux cross-compiler was installed** (`brew install zig` declined by Gustavo, 2026-11-25). | Linux code is syntax-checked against stub headers only until a Linux build is run (P1). |
 
 ### 0.3 Development standards: the definition of done
@@ -194,6 +197,9 @@ the corrected clock shown and kept (D17).
 **R14 AX.25.** 1200 Bd (NFM, VHF), 300 Bd (USB, HF), 9600 Bd (flat audio ≥ 38.4 kHz); FCS checked; APRS interpreted.
 
 **R15 Mouse.** Every action reachable with the mouse (D14).
+
+**R16 Phase 4 decoders.** ACARS (AM), VDL2 (IQ, all channels), AIS (IQ, both channels), FT8, FT4, WSPR (slots by
+the corrected clock); countries, distance and bearing from `--locator`; the Heard summary.
 
 **R8 Headless.** `--headless N`: one status line per second for N seconds (level, noise, measured rate, DSP load,
 sound queue and gaps, drops, stereo, overload, RDS, strongest spectrum peaks).
@@ -395,6 +401,10 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | E28 | Time-stamping | before: the demo's time stations read the PC clock +0.13–0.15 s off (should be ~0). After stamping blocks on arrival and locking the demo stations to the clock: CHU +0.005 and +0.010 s over two minutes, WWV +0.005 s (full codes); the decoder alone, fed the encoders' audio with exact stamps at fractions 0/0.37/0.73: +0.000 s |
 | E29 | Pictures saved headless from the demo band | `offgrid-SSTV-…-1.png` 320×256 (colour test card, no slant), `offgrid-FAX-…-1.png` 1809×198 (chart, straight); viewed |
 | E30 | Live APRS on the stick, 144.800 MHz NFM | automatic gain: OVERLOAD at −30 dBFS, 0 frames in 3 min; fixed 28 dB: no overload, channel at the noise floor (−50 dBFS) all 5 min, 0 frames — nothing received (antenna / local traffic), so not a decoder result (P19) |
+| E30b | Phase 4 self-tests | aviation 38/38 (ACARS 4 demo messages exact at 48/12 kHz, bad CRC rejected; VDL2 5 frames on 3 channels at once at 2.048/2.4 MS/s +250 Hz; 7 % of a core for 10 channels); AIS 50/50 (both channels at once, ±1 kHz, 98 % at 16 dB SNR, gpsd's AIVDM re-encoded byte-exact, 2 % of a core); FT8/FT4 156/156 (encoder identical to ft8_lib on 7 references, every message type, FT8 15/15 to −18 dB and FT4 8/8 to −12 dB with the PC clock ±2 s corrected, dt ≤ 10 ms; ~0.5 s a slot); WSPR 39/39 (K1ABC FN42 37 reference symbols identical, 4 stations to −26 dB, clock 40 s out found and measured to 0.02 s, stick error measured; ~0.7 s a slot). All suites: 715 checks pass |
+| E31 | Phase 4 demo band through the radio | ACARS all messages; VDL2 3 channels with ACARS-over-AVLC, acks, ATN; AIS both channels, 6 vessels with every field; WSPR G4OGR and K1OGS at −22/−26 dB, dt +0.0 s, RF 14.097062/14.097131 MHz (after placing the demo 1 s into the slot and passing the dial); FT8 8–10 decodes a slot with countries and distances from JO21, dt +0.0 s; FT4 contest exchange; DSP thread 2–3 %, 0 gaps, 0 drops |
+| E32 | Heard tab (pty capture) | "20 m: 7 stations, 7 countries" after a minute of FT8 demo |
+| E33 | **Live on the stick** | **VDL2 136.975 MHz: a real frame, 486649 (Netherlands) → ground, PH-CDQ, flight CD040P, label H1** (3 min, gain 28 dB); ACARS 131.725 MHz: none in 3 min; AIS 162.000 MHz: none in 4 min (inland, indoor antenna) |
 | E14 | Graphicx `make test` | 62 picture checks + 124 interface checks, 0 failures; `example-dashboard` driven in a pty (keys, mouse, theme change, menu, quit) |
 
 ## 11. Open problems
@@ -417,6 +427,9 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 | P14 | CW and RTTY lose the first characters after a pause (speed learning), as the JS does. | By design for now; a look-back re-decode is possible. |
 | P19 | No live APRS frame yet: none heard in 5 min on 144.800 MHz with the stick's antenna; automatic gain overloads there. | Outdoor VHF antenna; fixed gain (`-g 28`). |
 | P20 | The time decoder's first "second ticks found" estimate through the radio can be off by up to ~0.4 s (AGC settling), and once WWV's minute marker came out 21 s off; the full time codes were right (E28). T only accepts a full code. | Hold the tick report until the tick profile is steady. |
+| P21 | ACARS and AIS not yet received live (none in range in 3–4 min). | Outdoor antenna; a recording. |
+| P22 | The Heard tab's columns are cut in the 34-column side panel. | A wider popup view. |
+| P23 | FT4 reaches about −14 dB against WSJT-X's −17.5 dB; WSPR misses drifts beyond ±2 Hz (as the JS). | Tune the FT4 sync; a drift search. |
 | P16 | AX25Toolkit has no LICENSE file; its code is used with its author's permission (D15). | Add a license to AX25Toolkit (GPL-2.0-or-later or compatible). |
 | P17 | AX.25 9600 Bd needs flat discriminator audio at ≥ 38.4 kHz; the receiver's NFM audio is de-emphasised and 3 kHz wide. | A flat FM tap in the Receiver. |
 | P18 | Time decoding was not tried on real HF signals (the stick has no HF input). | Test with direct sampling or an upconverter. |
@@ -428,7 +441,7 @@ All on 2026-11-25, macOS (Apple clang 21), unless stated.
 |---|---|
 | 2 | **Built (2026-11-25):** text decoders on the audio: CW, RTTY, PSK31/63/125, NAVTEX, DSC, Hellschreiber; memories, logbook, labels, settings file; scan; frequency calibration; the code split into reusable libraries |
 | 3 | **Built (2026-11-25):** weather fax, SSTV, time signals (CHU, WWV, RWM) and the clock; AX.25/APRS (from phase 4); full mouse use |
-| 4 | Data: ACARS, VDL2, AIS, FT8/FT4/WSPR (with the "Heard" list and band survey) |
+| 4 | **Built (2026-11-25):** ACARS, VDL2, AIS, FT8/FT4/WSPR with the Heard list (the band survey is left for phase 5) |
 | 5 | Digital broadcast: DAB/DAB+ and DRM (AAC/xHE-AAC in C++11), AUTO mode, Signal Monitor, waterfall replay, SDRconnect |
 
 ## 13. Glossary

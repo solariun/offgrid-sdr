@@ -76,7 +76,9 @@ std::vector<Band> makeBands() {
     // Air & sea
     v.push_back(band("Air & sea", "Airband", 118000, 137000, 121500, Mode::AM, 8333.333));
     v.push_back(band("Air & sea", "Marine VHF", 156000, 162025, 156800, Mode::NFM, 25000));
-    v.push_back(band("Air & sea", "AIS", 161950, 162050, 161975, Mode::NFM, 50000));
+    v.push_back(band("Air & sea", "AIS", 161950, 162050, 162000, Mode::NFM, 25000));
+    v.push_back(band("Air & sea", "ACARS", 129125, 131850, 131725, Mode::AM, 25000));
+    v.push_back(band("Air & sea", "VDL2", 136600, 137000, 136800, Mode::AM, 25000));
     v.push_back(band("Air & sea", "NOAA weather", 162400, 162550, 162550, Mode::NFM, 25000));
     v.push_back(band("Air & sea", "NAVTEX", 490, 518, 518, Mode::USB, 100));
     // Other

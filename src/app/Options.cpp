@@ -117,6 +117,9 @@ std::string parse(int argc, char** argv, Options& o) {
             if (!dec::parseKind(v, k)) return "--decoder: one of cw, rtty, psk, navtex, dsc, hell";
             o.decoder = v;
             ++i;
+        } else if (a == "--locator" && hasValue) {
+            o.locator = v;
+            ++i;
         } else if (a == "--fresh") {
             o.fresh = true;
         } else if (a == "--wav" && hasValue) {
@@ -179,6 +182,8 @@ std::string usage() {
            "  --decoder NAME          start a decoder: cw, rtty, psk, navtex, dsc, hell (d in the\n"
            "                          interface); with --headless the text is printed\n"
            "  --fresh                 ignore the saved settings (~/.config/offgrid/settings.ini)\n"
+           "  --locator GRID          your Maidenhead locator (e.g. JO21): distances and bearings for\n"
+           "                          FT8/FT4/WSPR, the Heard list, AIS and APRS (kept)\n"
            "  -V, --version           version\n"
            "  -h, --help              this text\n"
            "\n"

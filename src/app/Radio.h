@@ -25,6 +25,8 @@
 #define OFFGRID_APP_RADIO_H
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <functional>
 #include <cstdio>
 #include <memory>
@@ -35,6 +37,7 @@
 
 #include "../audio/AudioOutput.h"
 #include "../decoders/Decoder.h"
+#include "../decoders/Heard.h"
 #include "../dsp/Receiver.h"
 #include "Source.h"
 
@@ -108,6 +111,18 @@ public:
     // DSP thread: decoder-specific settings (AX.25 speed, time station ...).
     void setDecoder(bool on, dec::Kind kind = dec::Kind::Cw, std::function<void(dec::Decoder&)> setup = std::function<void(dec::Decoder&)>());
     void setDecoderShift(double hz);
+    // The clock correction in use (PC - true seconds), passed to slot-based
+    // decoders (FT8, FT4, WSPR) with every block.
+    void setClockOffset(double pcMinusTrue);
+    // Your Maidenhead locator (distances and bearings: FT8/FT4/WSPR, the
+    // Heard list, AIS, APRS).  "" = unknown.
+    void setLocator(const std::string& grid);
+    // FT8 / FT4 / WSPR: a decoded slot's timings for the clock correction
+    // (ClockCorrection::applyFtxTimings); false when there is none new.
+    bool takeFtxTimings(std::string& proto, std::vector<double>& dts);
+    // The Heard summary (every FT8 / FT4 / WSPR decode, band by band) over
+    // the last windowSeconds, as text lines.
+    std::string heardText(double now, double windowSeconds, bool details = false) const;
     void resetDecoder();
     // New decoded text / Hell columns since the last call (UI thread).
     void takeDecoderText(std::string& out);
@@ -146,11 +161,34 @@ private:
     std::atomic<bool> running_;
     std::thread thread_;
 
-    // Decoder: created / replaced on the DSP thread when decoderDirty_.
-    std::unique_ptr<dec::Decoder> decoder_;
+    // Decoder: owned by its own thread (decoderLoop), so a heavy decode
+    // (FT8 / WSPR slots, ~1 s of CPU) never stalls the radio or the sound.
+    // The DSP thread queues each block's decoder input (DecoderJob).
+    struct DecoderJob {
+        std::vector<float> audio;          // receiver tap (audio decoders)
+        std::vector<dsp::Complex> iq;      // the stick's samples (IQ decoders)
+        double audioRate, iqRate, timestamp, clockOffset, dial, center;
+    };
+    void decoderLoop();
+    std::thread decoderThread_;
+    std::mutex jobMutex_;
+    std::condition_variable jobReady_;
+    std::deque<DecoderJob> jobs_;
+    unsigned jobsDropped_;
+    std::atomic<bool> decoderActive_;      // the DSP thread queues jobs only when on
+    std::atomic<bool> decoderIq_;          // ... with IQ instead of audio
+    dec::Status decStatus_;                // guarded by mutex_
+    bool decoderOn_;                       // guarded by mutex_
+    std::unique_ptr<dec::Decoder> decoder_;  // decoder thread only
     bool decoderWanted_, decoderDirty_, decoderReset_;
     dec::Kind decoderKind_;
     std::function<void(dec::Decoder&)> decoderSetup_;
+    double clockOffset_;
+    std::string locator_;
+    dec::HeardList heard_;                         // guarded by mutex_
+    std::string ftxProto_;                         // pending slot timings (mutex_)
+    std::vector<double> ftxDts_;
+    bool ftxPending_;
     std::string decText_;                          // waiting for the UI
     std::vector<std::vector<float> > decColumns_;  // waiting for the UI
     std::vector<dec::PictureLine> decLines_;       // waiting for the UI

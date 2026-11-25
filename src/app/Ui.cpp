@@ -770,6 +770,25 @@ void Ui::Impl::fillList() {
             ListBox::Item it = {"(M saves a memory)", std::string(), true, app.theme().dim};
             list.items.push_back(it);
         }
+    } else if (listTabs.selected == 3) {
+        // Heard: who this station hears, band by band, the last hour
+        // (every FT8 / FT4 / WSPR decode).
+        std::string text = radio.heardText(pcNow() - clock.offsetAt(pcNow()), 3600, false);
+        size_t start = 0;
+        while (start < text.size()) {
+            size_t nl = text.find('\n', start);
+            std::string line = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+            if (!line.empty()) {
+                ListBox::Item it = {line, std::string(), false, rgb(0, 0, 0)};
+                list.items.push_back(it);
+            }
+            if (nl == std::string::npos) break;
+            start = nl + 1;
+        }
+        if (list.items.empty()) {
+            ListBox::Item it = {"(FT8, FT4 and WSPR decodes show here)", std::string(), true, app.theme().dim};
+            list.items.push_back(it);
+        }
     } else {
         logCache = Store::readLog(200);
         for (size_t i = 0; i < logCache.size(); ++i) {
@@ -917,6 +936,7 @@ void Ui::Impl::build() {
     listTabs.tabs.push_back("Bands");
     listTabs.tabs.push_back("Memories");
     listTabs.tabs.push_back("Log");
+    listTabs.tabs.push_back("Heard");
     listTabs.onChange = [this](int) {
         list.selected = 0;
         fillList();
@@ -1126,7 +1146,7 @@ void Ui::Impl::bindKeys() {
     // (With the side list focused, Left/Right change its tab instead.)
     app.bindKey(KeyRight, [this]() {
         if (app.focused() == &list) {
-            listTabs.selected = (listTabs.selected + 1) % 3;
+            listTabs.selected = (listTabs.selected + 1) % 4;
             listTabs.onChange(listTabs.selected);
             return;
         }
@@ -1135,7 +1155,7 @@ void Ui::Impl::bindKeys() {
     });
     app.bindKey(KeyLeft, [this]() {
         if (app.focused() == &list) {
-            listTabs.selected = (listTabs.selected + 2) % 3;
+            listTabs.selected = (listTabs.selected + 3) % 4;
             listTabs.onChange(listTabs.selected);
             return;
         }
@@ -1309,7 +1329,16 @@ void Ui::Impl::update() {
     meter.update(snap.channelDbfs, 0.4);
     meter.valueText = fmt("%5.1f dB", snap.channelDbfs) + fmt("  SNR %4.1f", snap.channelDbfs - snap.noiseDbfs);
     if (framesSinceStart % 3 == 0) levelHistory.push(snap.channelDbfs, 512);
-    // The clock: corrected by time signals when set (marked with a dot).
+    if (listTabs.selected == 3 && framesSinceStart % 90 == 0) fillList();
+    {
+        std::string proto;
+        std::vector<double> dts;
+        if (radio.takeFtxTimings(proto, dts) && clock.applyFtxTimings(dts, proto, pcNow()))
+            say("clock corrected from " + proto + " stations");
+    }
+    // The clock: corrected by time signals when set (marked with a dot);
+    // slot-based decoders (FT8, FT4, WSPR) follow the corrected time.
+    radio.setClockOffset(clock.offsetAt(pcNow()));
     double corrected = clock.now(pcNow());
     std::time_t now = static_cast<std::time_t>(corrected);
     char clockText[24];

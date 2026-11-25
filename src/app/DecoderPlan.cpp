@@ -51,6 +51,21 @@ DecoderPlan planDecoder(dec::Kind kind, double hz) {
                 p.mode = dsp::Mode::LSB;
             }
             break;
+        case dec::Kind::Acars:  // AM, on the channel (131.550, 131.725 ... MHz)
+            p.mode = dsp::Mode::AM;
+            p.bandwidth = 0;
+            break;
+        case dec::Kind::Vdl2:   // IQ: every channel 136.6-137 MHz in the span
+            p.mode = dsp::Mode::AM;
+            p.bandwidth = 0;
+            break;
+        case dec::Kind::Ais:    // IQ: both channels; the dial between them (162.000)
+            p.mode = dsp::Mode::NFM;
+            p.bandwidth = 0;
+            break;
+        case dec::Kind::Ft8:
+        case dec::Kind::Ft4:
+        case dec::Kind::Wspr: break;  // USB, 3 kHz, the dial on the listed frequency
         case dec::Kind::Ax25: {
             const bool vhf = hz > 30e6;
             if (vhf) {

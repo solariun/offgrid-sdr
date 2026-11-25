@@ -27,6 +27,9 @@
 #include "Source.h"
 
 #include <netdb.h>
+
+#include <complex>
+#include <map>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -39,8 +42,13 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../decoders/Ais.h"
+#include "../decoders/AisEncoders.h"
+#include "../decoders/AviationEncoders.h"
 #include "../decoders/Ax25Encoders.h"
+#include "../decoders/WsprEncoders.h"
 #include "../decoders/FskEncoders.h"
+#include "../decoders/Ftx.h"
 #include "../decoders/PictureEncoders.h"
 #include "../decoders/TimeEncoders.h"
 #include "../decoders/PskEncoders.h"
@@ -483,6 +491,106 @@ void addDecoderStations(dsp::DemoSource& demo) {
             append(a, silence(1.5, r));
         }
         demo.addAudioStation(144800000, a, r, -40, dsp::Mode::NFM, "APRS");
+    }
+    // Phase 4. ACARS on 131.550 MHz (AM, bursts under a carrier gate).
+    {
+        std::vector<float> audio, gate;
+        dec::acarsDemoLoop(r, audio, gate);
+        std::vector<float> env(audio.size());
+        for (size_t i = 0; i < env.size(); ++i) env[i] = (i < gate.size() ? gate[i] : 0.0f) * (1.0f + 0.8f * audio[i]);
+        demo.addAudioStation(131550000, env, r, -36, dsp::Mode::AM, "ACARS");
+    }
+    // VDL2 bursts on 136.975, 136.675 and 136.775 MHz (30 s loop).
+    {
+        const double br = 105000;  // 10 samples a symbol
+        std::vector<dec::Vdl2DemoBurst> plan = dec::vdl2DemoBursts();
+        std::map<double, std::vector<dsp::DemoSource::Burst> > byChannel;
+        for (size_t i = 0; i < plan.size(); ++i) {
+            dsp::DemoSource::Burst b;
+            b.at = plan[i].at;
+            std::vector<std::complex<float> > iq;
+            dec::vdl2Modulate(dec::vdl2BurstSymbols(plan[i].frames), br, 0, 1.0, iq);
+            b.iq.assign(iq.begin(), iq.end());
+            byChannel[plan[i].freqHz].push_back(b);
+        }
+        for (std::map<double, std::vector<dsp::DemoSource::Burst> >::iterator c = byChannel.begin(); c != byChannel.end(); ++c)
+            demo.addBurstStation(c->first, c->second, br, 30, -36, "VDL2");
+    }
+    // AIS on both channels (161.975 / 162.025 MHz): the Liverpool Bay
+    // cycle, 30 s, as GMSK bursts.
+    {
+        const double br = 96000;
+        std::vector<dec::AisDemoBurst> plan = dec::aisDemoPlan();
+        std::vector<dsp::DemoSource::Burst> a, b;
+        for (size_t i = 0; i < plan.size(); ++i) {
+            std::vector<std::complex<float> > iq(static_cast<size_t>(plan[i].burst.seconds() * br) + 2);
+            dec::aisAddBurst(&iq[0], iq.size(), br, 0.0, 0.0, 1.0, plan[i].burst);
+            dsp::DemoSource::Burst burst;
+            burst.at = plan[i].t;
+            burst.iq.assign(iq.begin(), iq.end());
+            (plan[i].channel == 'A' ? a : b).push_back(burst);
+        }
+        demo.addBurstStation(dec::kAisChannelA, a, br, 30, -40, "AIS A");
+        demo.addBurstStation(dec::kAisChannelB, b, br, 30, -40, "AIS B");
+    }
+    // WSPR on the 20 m dial (14.0956 MHz): the demo stations every even
+    // minute, locked to the clock (the 4-minute buffer starts on an even
+    // minute, so its loop stays in step with the slots).
+    {
+        timeval tv;
+        gettimeofday(&tv, 0);
+        const double t0 = std::floor(tv.tv_sec / 120.0) * 120.0, wr = 12000;
+        std::vector<float> air(static_cast<size_t>(240 * wr), 0.0f);
+        std::vector<dec::enc::WsprStation> st = dec::enc::demoWsprStations();
+        for (size_t k = 0; k < st.size(); ++k) {
+            std::vector<float> tx = dec::enc::wsprTransmission(st[k], wr);
+            // Transmissions start 1 s into the slot.
+            for (int slot = 0; slot < 2; ++slot) {
+                const size_t at = static_cast<size_t>((slot * 120 + 1) * wr);
+                for (size_t i = 0; i < tx.size() && at + i < air.size(); ++i) air[at + i] += tx[i];
+            }
+        }
+        demo.addAudioStation(14095600, air, wr, -50, dsp::Mode::USB, "WSPR", t0);
+    }
+    // FT8 on the 20 m dial (14.074 MHz) and FT4 (14.080 MHz): a QSO or two
+    // and some CQs, slot by slot, locked to the clock (the loops start on a
+    // whole minute, so they stay in step with the slots).
+    {
+        timeval tv;
+        gettimeofday(&tv, 0);
+        const double t0 = std::floor(tv.tv_sec / 60.0) * 60.0, fr = 12000;
+        struct Tx {
+            int slot;
+            const char* text;
+            double f0, amp;
+        };
+        const Tx ft8[] = {
+            {0, "CQ G4OGR IO91", 820, 0.5},  {0, "CQ DL1OGS JO62", 1410, 0.25}, {0, "CQ EA8OGR IL18", 2150, 0.1},
+            {1, "G4OGR K1OGS FN42", 860, 0.15}, {1, "CQ VK2OGS QF56", 1720, 0.06},
+            {2, "K1OGS G4OGR -12", 820, 0.5},  {2, "DL1OGS PA3OGR JO21", 1410, 0.2},
+            {3, "G4OGR K1OGS R-08", 860, 0.15}, {3, "PA3OGR DL1OGS -05", 1450, 0.25}, {3, "CQ JA1OGR PM95", 2400, 0.04},
+        };
+        std::vector<float> air(static_cast<size_t>(60 * fr), 0.0f);
+        for (size_t i = 0; i < sizeof(ft8) / sizeof(ft8[0]); ++i) {
+            std::vector<float> tx;
+            if (!dec::ftx::synthesizeFt8(ft8[i].text, ft8[i].f0, fr, ft8[i].amp, tx)) continue;
+            const size_t at = static_cast<size_t>((ft8[i].slot * 15 + 0.5) * fr);  // 0.5 s into the slot
+            for (size_t k = 0; k < tx.size() && at + k < air.size(); ++k) air[at + k] += tx[k];
+        }
+        demo.addAudioStation(14074000, air, fr, -46, dsp::Mode::USB, "FT8", t0);
+
+        const Tx ft4[] = {
+            {0, "CQ TEST G4OGR IO91", 900, 0.4}, {1, "G4OGR SP9OGS 599 0012", 1300, 0.2},
+            {2, "SP9OGS G4OGR R 599 0451", 900, 0.4}, {3, "CQ TEST OH2OGR KP20", 1900, 0.15},
+        };
+        std::vector<float> air4(static_cast<size_t>(30 * fr), 0.0f);
+        for (size_t i = 0; i < sizeof(ft4) / sizeof(ft4[0]); ++i) {
+            std::vector<float> tx;
+            if (!dec::ftx::synthesizeFt4(ft4[i].text, ft4[i].f0, fr, ft4[i].amp, tx)) continue;
+            const size_t at = static_cast<size_t>((ft4[i].slot * 7.5 + 0.5) * fr);
+            for (size_t k = 0; k < tx.size() && at + k < air4.size(); ++k) air4[at + k] += tx[k];
+        }
+        demo.addAudioStation(14080000, air4, fr, -46, dsp::Mode::USB, "FT4", t0);
     }
     // Time stations, locked to the computer's clock: their code starts at
     // `now` and every (re)build plays the sample for the present moment

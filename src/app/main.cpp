@@ -26,6 +26,12 @@
 #include <ctime>
 #include <graphicx/png.h>
 
+#include <sys/time.h>
+
+#include <fstream>
+#include <sstream>
+
+#include "../decoders/Clock.h"
 #include "../rtlsdr/RtlSdr.h"
 #include "Bands.h"
 #include "Options.h"
@@ -174,6 +180,7 @@ void applyStore(const app::Store& st, app::Options& o) {
     o.radio.stereo = st.get("stereo", o.radio.stereo ? "1" : "0") == "1";
     o.radio.deemphasisUs = st.getNumber("deemphasis", o.radio.deemphasisUs);
     if (!st.get("theme").empty()) o.theme = st.get("theme");
+    o.locator = st.get("locator", o.locator);
     o.colormap = st.get("colormap", o.colormap);
 }
 
@@ -217,7 +224,21 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "offgrid: %s\n", error.c_str());
         return 1;
     }
+    if (!o.locator.empty()) {
+        radio.setLocator(o.locator);
+        store.set("locator", o.locator);
+    }
     if (!o.wav.empty() && !radio.startRecording(o.wav, error)) std::fprintf(stderr, "offgrid: %s\n", error.c_str());
+    // Slot-based decoders follow the saved clock correction (clock.txt).
+    {
+        std::ifstream in((app::Store::directory() + "/clock.txt").c_str());
+        std::stringstream text;
+        text << in.rdbuf();
+        dec::ClockCorrection clock;
+        timeval tv;
+        gettimeofday(&tv, 0);
+        if (in && clock.load(text.str())) radio.setClockOffset(clock.offsetAt(tv.tv_sec + tv.tv_usec * 1e-6));
+    }
     dec::Kind kind;
     if (o.headlessSeconds > 0 && !o.decoder.empty() && dec::parseKind(o.decoder, kind)) {
         // As in the interface (DecoderPlan.h).
